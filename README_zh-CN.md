@@ -146,7 +146,7 @@ test_config:                                      # 测试项配置
     enabled: False
 
 llm_config:                                       # 视觉模型配置，当前仅支持 OpenAI SDK 兼容格式
-  model: gpt-4.1                                  # 推荐使用
+  model: gpt-4.1-2025-04-14                       # 推荐使用
   api_key: your_api_key
   base_url: https://api.example.com/v1
 
