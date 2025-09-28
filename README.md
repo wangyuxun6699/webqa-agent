@@ -176,7 +176,7 @@ Based on our testing, these models work well with WebQA Agent:
 
 | Model                             | Key Strengths               | Notes                           |
 |-----------------------------------|-----------------------------|---------------------------------|
-| **gpt-4.1-2025-04-14** ⭐          | High accuracy & reliability | **Best choice**                 |
+| **gpt-4.1-2025-04-14** ⭐         | High accuracy & reliability | **Best choice**                 |
 | **gpt-4.1-mini-2025-04-14**       | Cost-effective              | **Economical and practical**    |
 | **qwen3-vl-235b-a22b-instruct**   | Open-source, GPT-4.1 level  | **Best for on-premise**         |
 | **doubao-seed-1-6-vision-250815** | Vision capabilities         | **Excellent web understanding** |
