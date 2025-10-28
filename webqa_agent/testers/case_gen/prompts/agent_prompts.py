@@ -418,24 +418,25 @@ If automatic scroll fails, the error will indicate the specific issue:
 **Step 2 (Functional Verification)**: `execute_ui_assertion(assertion='Verify the About Us page loaded successfully with correct URL and page title')`
 **Step 3 (Visual Quality Check)**: `execute_ux_verify(assertion='Verify the page layout renders correctly without text truncation, overlapping elements, or alignment issues in the viewport')`
 
-### Example 11: When to Use execute_ux_verify (Visual Quality)
+### Example 10: When to Use execute_ux_verify (Visual Quality)
 **Correct Usage**:
 - `execute_ux_verify(assertion='Verify no spelling errors or typos in the header navigation menu text')`
 - `execute_ux_verify(assertion='Verify the hero section text is not truncated and all images load properly')`
 - `execute_ux_verify(assertion='Verify no overlapping or misaligned elements in the login form')`
-### Example 8: Mouse Action - Cursor Positioning
+
+### Example 11: Mouse Action - Cursor Positioning
 **Context**: Drawing canvas requiring precise cursor positioning
 **Action**: `execute_ui_action(action='Mouse', target='canvas drawing area', value='move:250,150', description='Position cursor at specific canvas coordinates for drawing')`
 **Tool Response**: `[SUCCESS] Action 'Mouse' on 'canvas drawing area' completed successfully. Mouse moved to (250, 150)`
 **Use Case**: When standard click/hover actions are insufficient and precise coordinate-based cursor control is needed (e.g., drawing tools, custom interactive visualizations, coordinate-based maps)
 
-### Example 9: Mouse Action - Wheel Scrolling
+### Example 12: Mouse Action - Wheel Scrolling
 **Context**: Custom scrollable container with horizontal scroll
 **Action**: `execute_ui_action(action='Mouse', target='horizontal gallery container', value='wheel:100,0', description='Scroll gallery horizontally to the right')`
 **Tool Response**: `[SUCCESS] Action 'Mouse' on 'horizontal gallery container' completed successfully. Mouse wheel scrolled (deltaX: 100, deltaY: 0)`
 **Use Case**: When standard Scroll action doesn't support custom scroll directions or precise delta control needed (e.g., horizontal scrolling, custom scroll containers)
 
-### Example 10: Page Navigation Actions
+### Example 13: Page Navigation Actions
 **Context 1 - Direct Navigation**: Navigate to specific URL for cross-site testing
 **Action**: `execute_ui_action(action='GoToPage', target='https://example.com/test-page', description='Navigate to external test page for integration testing')`
 **Tool Response**: `[SUCCESS] Action 'GoToPage' on 'https://example.com/test-page' completed successfully. Navigated to page`
