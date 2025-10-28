@@ -97,7 +97,6 @@ class LLMAPI:
                 "model": actual_model,
                 "messages": messages,
                 "timeout": 360,
-                "max_tokens": 16000,
             }
             # Always send user/configured temperature when provided (default handled upstream)
             if temperature is not None:
