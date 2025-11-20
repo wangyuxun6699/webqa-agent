@@ -58,7 +58,7 @@ class UIUXViewportTool(BaseTool):
         try:
             logging.debug(f"Executing UX verification: {assertion}")
 
-            # Dynamically get current page from driver (handles get_new_page updates)
+            # Dynamically get current page from driver
             page = self.ui_tester_instance.driver.get_page()
 
             dp = DeepCrawler(page)

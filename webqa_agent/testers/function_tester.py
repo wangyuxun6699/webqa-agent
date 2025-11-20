@@ -101,15 +101,6 @@ class UITester:
             logging.debug(f"Executing AI instruction: {test_step}")
             self.page = self.driver.get_page()
 
-            # Get page context for multi-tab awareness
-            page_context = None
-            if self.driver and self.driver.page_manager:
-                try:
-                    page_context = self.driver.page_manager.get_page_context_info()
-                except Exception as e:
-                    logging.warning(f"Failed to retrieve tab context: {e}")
-                    page_context = None
-
             # Pre-check if operation is page-agnostic before crawling
             # This allows page-agnostic operations to execute on PDF/plugin pages
             is_likely_page_agnostic = self._is_instruction_page_agnostic(test_step)
@@ -152,8 +143,7 @@ class UITester:
                         "error": error_msg,
                         "start_time": start_time,
                         "end_time": end_time,
-                        "dom_diff": {},
-                        "tab_context": page_context,  # Tab state for AI agent awareness and debugging
+                        "dom_diff": {}
                     }
 
                     # Build error result
@@ -195,9 +185,9 @@ class UITester:
                 test_step,
                 prev.to_llm_json(template=planning_template),
                 LLMPrompt.planner_output_prompt,
-                tab_context=page_context,
                 page_status=page_status,
-                page_type=page_type
+                page_type=page_type,
+                is_page_agnostic=is_likely_page_agnostic
             )
 
             # Generate plan
@@ -210,19 +200,9 @@ class UITester:
 
             end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Re-fetch page after execution in case get_new_page was called
+            # Re-fetch page after execution
             # This ensures DOM diff is computed on the correct page
             self.page = self.driver.get_page()
-
-            # Get updated page context after execution (tab may have changed)
-            page_context_after = None
-            if self.driver and self.driver.page_manager:
-                try:
-                    page_context_after = self.driver.page_manager.get_page_context_info()
-                except Exception as e:
-                    logging.warning(f"Failed to retrieve tab context after action: {e}")
-                    page_context_after = None
-
             dp_after = DeepCrawler(self.page)
             curr = await dp_after.crawl(highlight=True, viewport_only=False, cache_dom=True)
             diff_elems = curr.diff_dict([str(ElementKey.TAG_NAME), str(ElementKey.INNER_TEXT), str(ElementKey.ATTRIBUTES), str(ElementKey.CENTER_X), str(ElementKey.CENTER_Y)])
@@ -249,7 +229,6 @@ class UITester:
                 "start_time": start_time,
                 "end_time": end_time,
                 "dom_diff": diff_elems,  # DOM difference information
-                "tab_context": page_context_after,  # Tab state for AI agent awareness and debugging
             }
 
             # 在execution_result中也添加DOM差异信息
@@ -278,7 +257,6 @@ class UITester:
             # Safely get possibly undefined variables
             safe_marker_screenshot = locals().get("marker_screenshot")
             safe_plan_json = locals().get("plan_json", {})
-            safe_page_context = locals().get("page_context")
 
             # Build error case execution step dictionary structure
             error_screenshots = [{"type": "base64", "data": safe_marker_screenshot}] if safe_marker_screenshot else []
@@ -292,7 +270,6 @@ class UITester:
                 "error": str(e),
                 "start_time": start_time,
                 "end_time": end_time,
-                "tab_context": safe_page_context,  # Tab state for AI agent awareness and debugging
             }
 
             self.execution_history.append({
@@ -380,16 +357,8 @@ class UITester:
 
         return "maintain"
 
-    def _build_context_aware_prompt(self, assertion: str, page_info: str, page_structure: str, execution_context: Dict[str, Any], tab_context: dict = None) -> str:
-        """Build context-aware verification prompt with tab context.
-
-        Args:
-            assertion: The assertion to verify
-            page_info: Current page URL and title
-            page_structure: Full text content
-            execution_context: Execution history and previous action results
-            tab_context: Optional tab context for multi-tab verification
-        """
+    def _build_context_aware_prompt(self, assertion: str, page_info: str, page_structure: str, execution_context: Dict[str, Any]) -> str:
+        """Build context-aware verification prompt."""
         context_str = self._format_execution_context(execution_context)
 
         # Use enhanced prompt with context
@@ -398,7 +367,7 @@ class UITester:
         )
 
         return self._prepare_prompt_verify(
-            f"assertion: {assertion}", page_info, enhanced_prompt, page_structure, tab_context=tab_context
+            f"assertion: {assertion}", page_info, enhanced_prompt, page_structure
         )
 
     async def verify(self, assertion: str, execution_context: Optional[Dict[str, Any]] = None) -> tuple[Dict[str, Any], Dict[str, Any]]:
@@ -452,16 +421,6 @@ class UITester:
                 }
 
                 end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-                # Get page context for verification skip case
-                skip_page_context = None
-                if self.driver and self.driver.page_manager:
-                    try:
-                        skip_page_context = self.driver.page_manager.get_page_context_info()
-                    except Exception as e:
-                        logging.warning(f"Failed to retrieve tab context for verification skip: {e}")
-                        skip_page_context = None
-
                 skip_step = {
                     "description": f"verify: {assertion}",
                     "actions": [],
@@ -470,7 +429,6 @@ class UITester:
                     "status": "failed",
                     "start_time": start_time,
                     "end_time": end_time,
-                    "tab_context": skip_page_context,  # Tab state for AI agent awareness and debugging
                 }
                 self.add_step_data(skip_step, step_type="assertion")
                 return skip_step, skip_result
@@ -478,16 +436,6 @@ class UITester:
 
             page_url, page_title = await self.driver.get_url()
             logging.debug(f"verification page url: {page_url}, title: {page_title}")
-
-            # Get page context for verification
-            page_context = None
-            if self.driver and self.driver.page_manager:
-                try:
-                    page_context = self.driver.page_manager.get_page_context_info()
-                except Exception as e:
-                    logging.warning(f"Failed to retrieve tab context for verification: {e}")
-                    page_context = None
-
             # Crawl current page
             dp = DeepCrawler(self.page)
             await dp.crawl(highlight=True, filter_text=True, viewport_only=True)
@@ -513,12 +461,12 @@ class UITester:
             page_info = f"url: {page_url}, title: {page_title}"
             if execution_context:
                 logging.debug("Using context-aware verification prompt")
-                user_prompt = self._build_context_aware_prompt(assertion, page_info, page_structure, execution_context, tab_context=page_context)
+                user_prompt = self._build_context_aware_prompt(assertion, page_info, page_structure, execution_context)
             else:
                 logging.debug("Using standard verification prompt")
                 # Prepare LLM input
                 user_prompt = self._prepare_prompt_verify(
-                    f"assertion: {assertion}", page_info, LLMPrompt.verification_prompt, page_structure, tab_context=page_context
+                    f"assertion: {assertion}", page_info, LLMPrompt.verification_prompt, page_structure
                 )
 
             images_for_llm = [img for img in [marker_screenshot, screenshot] if img]
@@ -566,7 +514,6 @@ class UITester:
                 "status": status_str,
                 "start_time": start_time,
                 "end_time": end_time,
-                "tab_context": page_context,  # Tab state for AI agent awareness and debugging
             }
 
             # Automatically store assertion step data
@@ -590,9 +537,6 @@ class UITester:
 
             end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Safely get page_context if available
-            safe_verify_page_context = locals().get("page_context")
-
             error_step = {
                 "description": f"verify: {assertion}",
                 "actions": [],
@@ -602,7 +546,6 @@ class UITester:
                 "error": str(e),
                 "start_time": start_time,
                 "end_time": end_time,
-                "tab_context": safe_verify_page_context,  # Tab state for AI agent awareness and debugging
             }
 
             # Error assertion step data
@@ -616,9 +559,9 @@ class UITester:
         test_step: str,
         browser_elements: str,
         prompt_template: str,
-        tab_context: dict = None,
         page_status: str = "SUPPORTED",
-        page_type: str = "html"
+        page_type: str = "html",
+        is_page_agnostic: bool = False
     ) -> str:
         """Prepare LLM prompt with tab context and page status awareness.
 
@@ -626,9 +569,9 @@ class UITester:
             test_step: The test step instruction
             browser_elements: Interactive elements description
             prompt_template: The prompt template
-            tab_context: Optional tab context for multi-tab awareness
             page_status: Page status (SUPPORTED or UNSUPPORTED_PAGE)
             page_type: Type of page content (html, pdf, plugin, etc.)
+            is_page_agnostic: Whether this is a page-agnostic browser-level operation
         """
         import json
 
@@ -637,60 +580,73 @@ class UITester:
             "===================="
         ]
 
-        # If page is unsupported (PDF, plugin, etc.), add special guidance for LLM
-        if page_status == "UNSUPPORTED_PAGE":
+        # Check if DOM is empty or minimal
+        dom_is_empty = (
+            not browser_elements or
+            browser_elements.strip() in ["{}", ""] or
+            browser_elements.strip() == "null"
+        )
+
+        # Add special guidance if:
+        # 1. Page is unsupported (PDF, plugin, etc.) - always show guidance
+        # 2. Operation is page-agnostic - ALWAYS show guidance (regardless of DOM state)
+        # Rationale: Page-agnostic operations (GoBack, GoToPage, Sleep, Screenshot)
+        # fundamentally don't require DOM elements, so guidance should always be shown
+        should_add_guidance = (
+            page_status == "UNSUPPORTED_PAGE" or
+            is_page_agnostic  # Removed dom_is_empty check - always guide for page-agnostic ops
+        )
+
+        if should_add_guidance:
+            # Determine appropriate status message based on actual page state
+            if page_status == "UNSUPPORTED_PAGE":
+                status_message = f"Current page is {page_type} content (non-HTML). DOM interaction not possible."
+            elif dom_is_empty:
+                status_message = "Current page has no interactive elements (empty DOM or minimal content)."
+            else:
+                # Safety fallback (shouldn't reach here due to condition logic)
+                status_message = "Note: This is a browser-level operation."
+
+            # Log diagnostic information for debugging
+            logging.debug(
+                f"Adding page-agnostic guidance: page_status={page_status}, "
+                f"is_page_agnostic={is_page_agnostic}, dom_is_empty={dom_is_empty}, "
+                f"instruction='{test_step[:60]}...'"
+            )
+
             prompt_parts.extend([
-                f"⚠️ **PAGE STATUS**: {page_status} (page_type: {page_type})",
-                f"**IMPORTANT**: Current page is {page_type} content. DOM elements are NOT available.",
-                "**ALLOWED ACTIONS**: Only page-agnostic operations can execute:",
+                f"⚠️ **OPERATION TYPE**: Page-agnostic browser-level operation",
+                f"**PAGE STATUS**: {page_status}",
+                f"**IMPORTANT**: {status_message}",
+                "",
+                "**ALLOWED ACTIONS** (work at browser level, no DOM needed):",
                 "  - GoBack, GoToPage: Browser navigation",
-                "  - GetNewPage, SwitchBackTab: Tab management",
                 "  - Sleep, Screenshot: Utility operations",
-                "**FORBIDDEN ACTIONS**: Tap, Input, Hover, Scroll, SelectDropdown (require DOM elements)",
-                "**CRITICAL**: Plan page-agnostic actions even when pageDescription is empty!",
+                "",
+                "**FORBIDDEN ACTIONS** (require DOM elements):",
+                "  - Tap, Input, Hover, Scroll, SelectDropdown",
+                "",
+                "**CRITICAL**: Plan the page-agnostic action even when pageDescription is empty!",
+                "**DO NOT**: Return empty actions array for browser-level operations.",
                 "===================="
             ])
 
         prompt_parts.append(f"pageDescription (interactive elements): {browser_elements}")
-
-        # Add tab context for multi-tab awareness
-        if tab_context:
-            prompt_parts.append("====================")
-            prompt_parts.append(f"tabContext (current tab state):\n{json.dumps(tab_context, indent=2)}")
-
         prompt_parts.append("====================")
         prompt_parts.append(prompt_template)
 
         return "\n".join(prompt_parts)
 
-    def _prepare_prompt_verify(self, test_step: str, page_info: str, prompt_template: str, page_structure: str, tab_context: dict = None) -> str:
-        """Prepare LLM prompt with tab context awareness.
-
-        Args:
-            test_step: The test step instruction
-            page_info: Current page URL and title
-            prompt_template: The prompt template
-            page_structure: Full text content of the page
-            tab_context: Optional tab context for multi-tab verification
-        """
-        import json
-
-        prompt_parts = [
-            f"test step: {test_step}",
-            "====================",
-            f"page info: {page_info}",
-            f"page_structure (full text content): {page_structure}"
-        ]
-
-        # Add tab context for multi-tab verification
-        if tab_context:
-            prompt_parts.insert(3, "====================")
-            prompt_parts.insert(4, f"tabContext (current tab state):\n{json.dumps(tab_context, indent=2)}")
-
-        prompt_parts.append("====================")
-        prompt_parts.append(prompt_template)
-
-        return "\n".join(prompt_parts)
+    def _prepare_prompt_verify(self, test_step: str, page_info: str, prompt_template: str, page_structure: str) -> str:
+        """Prepare LLM prompt."""
+        return (
+            f"test step: {test_step}\n"
+            f"====================\n"
+            f"page info: {page_info}\n"
+            f"page_structure (full text content): {page_structure}\n"
+            f"====================\n"
+            f"{prompt_template}"
+        )
 
     async def _generate_plan(self, system_prompt: str, prompt: str, browser_screenshot: str) -> Dict[str, Any]:
         """Generate test plan."""
@@ -1013,11 +969,6 @@ class UITester:
         self.step_counter = 0
 
     async def get_current_page(self):
-        try:
-            if self.driver:
-                return await self.driver.get_new_page()
-        except Exception as e:
-            logging.warning(f"UITester.get_current_page failed to detect new page: {e}")
         return self.driver.get_page()
 
     def _is_instruction_page_agnostic(self, test_step: str) -> bool:
@@ -1027,8 +978,7 @@ class UITester:
         can execute on unsupported page types (PDF, plugin, download pages).
 
         Page-agnostic operations work at browser level and don't require DOM elements:
-        - Browser navigation: GoBack, GoForward
-        - Tab switching: GetNewPage, SwitchBackTab
+        - Browser navigation: GoBack, GoForward, GoToPage
         - Utility: Sleep, Screenshot
 
         Uses both keyword matching and action type detection for robustness.

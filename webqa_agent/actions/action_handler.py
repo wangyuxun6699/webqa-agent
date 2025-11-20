@@ -779,12 +779,79 @@ class ActionHandler:
         action_context_var.set(ctx)
         ctx.element_info = {"element_id": str(id), "action": "click"}
 
-        # Inject JavaScript into the page to remove the target attribute from all links
+        # Inject comprehensive tab interception script (multi-layer defense)
+        # This ensures all new tab attempts are redirected to current tab
         js = """
-        links = document.getElementsByTagName("a");
-        for (var i = 0; i < links.length; i++) {
-            links[i].removeAttribute("target");
-        }
+        (function() {
+            // Layer 1: Remove/modify target attributes from ALL elements
+            function enforceCurrentTabNavigation() {
+                // Links: set to _self instead of removing (more reliable)
+                document.querySelectorAll('a[target]').forEach(el =>
+                    el.setAttribute('target', '_self')
+                );
+                // Forms: redirect form submissions to current tab
+                document.querySelectorAll('form[target]').forEach(el =>
+                    el.setAttribute('target', '_self')
+                );
+                // Image map areas
+                document.querySelectorAll('area[target]').forEach(el =>
+                    el.setAttribute('target', '_self')
+                );
+                // Base tag (affects all links document-wide)
+                const baseTag = document.querySelector('base[target]');
+                if (baseTag) baseTag.setAttribute('target', '_self');
+            }
+
+            // Layer 2: Override window.open() to redirect to current tab
+            if (!window.__webqa_window_open_intercepted) {
+                const originalWindowOpen = window.open;
+                window.open = function(url, target, features) {
+                    console.log('[WebQA] Intercepted window.open() call, redirecting to current tab:', url);
+                    if (url) {
+                        window.location.href = url;
+                    }
+                    return window;  // Return current window instead of new window
+                };
+                window.__webqa_window_open_intercepted = true;
+            }
+
+            // Layer 3: MutationObserver to catch dynamically added elements
+            if (!window.__webqa_mutation_observer_active) {
+                const observer = new MutationObserver((mutations) => {
+                    mutations.forEach(mutation => {
+                        mutation.addedNodes.forEach(node => {
+                            if (node.nodeType === 1) {  // Element node
+                                // Check if added node has target attribute
+                                if (node.hasAttribute && node.hasAttribute('target')) {
+                                    node.setAttribute('target', '_self');
+                                }
+                                // Check descendants for target attributes
+                                if (node.querySelectorAll) {
+                                    node.querySelectorAll('[target]').forEach(el =>
+                                        el.setAttribute('target', '_self')
+                                    );
+                                }
+                            }
+                        });
+                    });
+                });
+
+                observer.observe(document.documentElement, {
+                    childList: true,
+                    subtree: true
+                });
+                window.__webqa_mutation_observer_active = true;
+            }
+
+            // Layer 4: Initial enforcement on current page state
+            enforceCurrentTabNavigation();
+
+            // Layer 5: Periodic re-enforcement for delayed/async content (every 1 second)
+            if (!window.__webqa_periodic_check_active) {
+                setInterval(enforceCurrentTabNavigation, 1000);
+                window.__webqa_periodic_check_active = true;
+            }
+        })();
         """
         await page.evaluate(js)
 
@@ -1419,45 +1486,6 @@ class ActionHandler:
             logging.error(f'Failed to navigate back: {e}')
             return False
 
-    async def get_new_page(self):
-        try:
-            if self.driver:
-                self.page = await self.driver.get_new_page()
-            else:
-                # If no driver, check current context page list
-                pages = self.page.context.pages if self.page else []
-                if len(pages) > 1:
-                    self.page = pages[-1]
-            return True
-        except Exception as e:
-            logging.error(f'Failed to get new page: {e}')
-            return False
-
-    async def switch_back_tab(self) -> bool:
-        """Switch back to the previous tab/page in the navigation stack.
-
-        This is different from go_back() which navigates browser history.
-        switch_back_tab() returns to the parent tab that opened the current tab.
-
-        Returns:
-            bool: True if successfully switched, False otherwise
-        """
-        try:
-            if self.driver and self.driver.page_manager:
-                previous_page = await self.driver.get_previous_page()
-                if previous_page:
-                    self.page = previous_page
-                    logging.debug(f'Switched back to previous tab: {self.page.url}')
-                    return True
-                else:
-                    logging.warning('No previous tab to return to (stack is empty)')
-                    return False
-            else:
-                logging.error('PageManager not available, cannot switch back to previous tab')
-                return False
-        except Exception as e:
-            logging.error(f'Failed to switch back to previous tab: {e}')
-            return False
 
     async def upload_file(self, id, file_path: Union[str, List[str]]) -> bool:
         """File upload function.

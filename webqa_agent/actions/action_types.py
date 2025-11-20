@@ -20,7 +20,7 @@ class ActionType(str, Enum):
 
     Action types are categorized into:
     - DOM-dependent actions: Require page DOM elements (Tap, Input, etc.)
-    - Page-agnostic actions: Browser-level operations (GoBack, SwitchBackTab, etc.)
+    - Page-agnostic actions: Browser-level operations (GoBack, GoToPage, Sleep, etc.)
     """
 
     # DOM-dependent actions (require interactive elements on page)
@@ -38,8 +38,6 @@ class ActionType(str, Enum):
     # Page-agnostic actions (browser-level operations, work on PDF/plugin pages)
     GO_BACK = "GoBack"
     GO_TO_PAGE = "GoToPage"
-    GET_NEW_PAGE = "GetNewPage"
-    SWITCH_BACK_TAB = "SwitchBackTab"
     SLEEP = "Sleep"
     SCREENSHOT = "Screenshot"
 
@@ -48,8 +46,6 @@ class ActionType(str, Enum):
 # These operations don't require DOM elements and work at browser level
 PAGE_AGNOSTIC_ACTIONS: Set[str] = {
     ActionType.GO_BACK,
-    ActionType.GET_NEW_PAGE,
-    ActionType.SWITCH_BACK_TAB,
     ActionType.SLEEP,
     ActionType.SCREENSHOT,
 }
@@ -58,33 +54,6 @@ PAGE_AGNOSTIC_ACTIONS: Set[str] = {
 # Action metadata for enhanced capabilities
 # Provides additional information about each action type
 ACTION_METADATA: Dict[str, Dict] = {
-    ActionType.SWITCH_BACK_TAB: {
-        "is_page_agnostic": True,
-        "requires_dom": False,
-        "requires_target": False,
-        "default_phrase": "Switch back to parent tab",
-        "aliases": [
-            "close current tab",
-            "return to parent tab",
-            "close tab",
-            "switch back",
-            "go back to parent",
-        ],
-        "description": "Closes current tab and returns to parent tab in the stack",
-    },
-    ActionType.GET_NEW_PAGE: {
-        "is_page_agnostic": True,
-        "requires_dom": False,
-        "requires_target": False,
-        "default_phrase": "Switch to new page/tab",
-        "aliases": [
-            "switch to new tab",
-            "open new page",
-            "new tab",
-            "switch tab",
-        ],
-        "description": "Switches to a newly opened tab/window",
-    },
     ActionType.GO_BACK: {
         "is_page_agnostic": True,
         "requires_dom": False,
@@ -133,14 +102,12 @@ def is_page_agnostic_action(action_type: str) -> bool:
     so they can execute on unsupported page types like PDF, plugins, downloads, etc.
 
     Args:
-        action_type: Action type string (e.g., "SwitchBackTab", "Tap")
+        action_type: Action type string (e.g., "GoBack", "Tap")
 
     Returns:
         True if action is page-agnostic, False otherwise
 
     Examples:
-        >>> is_page_agnostic_action("SwitchBackTab")
-        True
         >>> is_page_agnostic_action("GoBack")
         True
         >>> is_page_agnostic_action("Tap")
@@ -156,7 +123,7 @@ def get_action_default_phrase(action_type: str, target: str = "", value: str = "
     instruction formatting across the codebase.
 
     Args:
-        action_type: Action type (e.g., "SwitchBackTab")
+        action_type: Action type (e.g., "GoBack")
         target: Target element identifier (optional)
         value: Action value (optional)
 
@@ -164,8 +131,8 @@ def get_action_default_phrase(action_type: str, target: str = "", value: str = "
         Formatted action phrase string
 
     Examples:
-        >>> get_action_default_phrase("SwitchBackTab")
-        "Switch back to parent tab"
+        >>> get_action_default_phrase("GoBack")
+        "Navigate back to the previous page"
         >>> get_action_default_phrase("Sleep", value="2000")
         "Wait for 2000 milliseconds"
         >>> get_action_default_phrase("Tap", target="button_123")
@@ -195,14 +162,14 @@ def get_action_aliases(action_type: str) -> list:
     Useful for keyword-based detection in instructions.
 
     Args:
-        action_type: Action type (e.g., "SwitchBackTab")
+        action_type: Action type (e.g., "GoBack")
 
     Returns:
         List of alias strings
 
     Examples:
-        >>> get_action_aliases("SwitchBackTab")
-        ["close current tab", "return to parent tab", "close tab", ...]
+        >>> get_action_aliases("GoBack")
+        ["go back", "navigate back", "back", ...]
     """
     metadata = ACTION_METADATA.get(action_type, {})
     return metadata.get("aliases", [])
@@ -254,11 +221,4 @@ def get_page_agnostic_keywords() -> list:
         'sleep', 'wait', 'wait for', 'pause',
         # Screenshot variations
         'screenshot', 'capture', 'capture screen', 'take screenshot',
-        # GetNewPage variations
-        'getnewpage', 'get new page', 'switch tab', 'switch window',
-        'switch to new', 'open new tab', 'new tab', 'switch to new tab',
-        # SwitchBackTab variations (CRITICAL - covers user-reported scenarios)
-        'switchbacktab', 'switch back tab', 'switch back',
-        'return to parent tab', 'return to parent', 'close tab', 'close current tab',
-        'go back to parent', 'parent tab', 'close this tab',
     ]

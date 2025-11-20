@@ -39,7 +39,6 @@ class UIActionSchema(BaseModel):
             "'GoToPage' - Navigate to a URL; "
             "'GoBack' - Navigate back to the previous page; "
             "'Sleep' - Wait for a specified duration; "
-            "'GetNewPage' - Switch to a new tab or window; "
             "'Mouse' - Move mouse cursor or scroll mouse wheel."
         )
     )
@@ -64,8 +63,7 @@ class UIActionSchema(BaseModel):
             "'Upload' action (file path), "
             "'Sleep' action (duration in milliseconds), "
             "'Mouse' action (operation specification in format 'move:x,y' for cursor positioning to coordinates (x,y) or 'wheel:deltaX,deltaY' for scrolling by delta values. Examples: 'move:100,200' moves cursor to (100,200), 'wheel:0,100' scrolls down by 100 pixels). "
-            "Optional for 'Drag' action (target position description), "
-            "'GetNewPage' action (tab/window identifier). "
+            "Optional for 'Drag' action (target position description). "
             "Optional for other actions."
         )
     )
@@ -181,12 +179,6 @@ class UITool(BaseTool):
             action_phrase = f"Navigate back to the previous page"
         elif action == "Sleep":
             action_phrase = f"Wait for {value or '1000'} milliseconds"
-        elif action == "GetNewPage":
-            action_phrase = f"Switch to new page/tab"
-            if value:
-                action_phrase += f" {value}"
-        elif action == "SwitchBackTab":
-            action_phrase = get_action_default_phrase(ActionType.SWITCH_BACK_TAB)
         elif action == "Mouse":
             if value and 'move:' in value.lower():
                 # Extract coordinates from 'move:x,y' format

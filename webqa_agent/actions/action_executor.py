@@ -17,13 +17,11 @@ class ActionExecutor:
             "Clear": self._execute_clear,
             "Scroll": self._execute_scroll,
             "KeyboardPress": self._execute_keyboard_press,
-            "GetNewPage": self._execute_get_new_page,
             "Upload": self._execute_upload,
             "SelectDropdown": self._execute_select_dropdown,
             "Drag": self._execute_drag,
             "GoToPage": self._execute_go_to_page,  # Added missing action
             "GoBack": self._execute_go_back,  # Added browser back navigation
-            "SwitchBackTab": self._execute_switch_back_tab,  # Added tab switching action
             "Mouse": self._execute_mouse, # Added mouse action
         }
 
@@ -320,39 +318,6 @@ class ActionExecutor:
                 "error_details": error_details
             }
 
-    async def _execute_get_new_page(self):
-        """Execute get new page action."""
-        success = await self._actions.get_new_page()
-
-        # Get tab context for enriched response
-        tab_context = {}
-        if success and self._actions.driver and self._actions.driver.page_manager:
-            pm = self._actions.driver.page_manager
-            current = pm.get_current_page_info()
-            if current:
-                tab_context = {
-                    "switched_to_tab_id": current.page_id,
-                    "parent_tab_id": current.parent_id,
-                    "new_tab_url": current.url,
-                    "new_tab_title": current.title,
-                    "stack_depth": pm.get_stack_depth()
-                }
-
-        if success:
-            message = "Successfully switched to new page."
-            if tab_context:
-                message += f" (url: {tab_context.get('new_tab_url', 'unknown')})"
-            return {
-                "success": True,
-                "message": message,
-                "tab_context": tab_context
-            }
-        else:
-            return {
-                "success": False,
-                "message": "Failed to get new page (no new page detected).",
-                "tab_context": {}
-            }
 
     async def _execute_upload(self, action, file_path):
         """Execute upload action."""
@@ -698,50 +663,7 @@ class ActionExecutor:
                 "message": f"Go back failed: {str(e)}",
                 "error_details": error_details
             }
-
-    async def _execute_switch_back_tab(self):
-        """Execute switch back to previous tab action."""
-        try:
-            success = await self._actions.switch_back_tab()
-
-            # Get tab context for enriched response
-            tab_context = {}
-            if success and self._actions.driver and self._actions.driver.page_manager:
-                pm = self._actions.driver.page_manager
-                current = pm.get_current_page_info()
-                if current:
-                    tab_context = {
-                        "returned_to_tab_id": current.page_id,
-                        "parent_tab_id": current.parent_id,
-                        "current_tab_url": current.url,
-                        "current_tab_title": current.title,
-                        "stack_depth": pm.get_stack_depth(),
-                        "can_go_back": pm.get_stack_depth() > 1
-                    }
-
-            if success:
-                message = "Successfully switched back to previous tab."
-                if tab_context:
-                    message += f" (url: {tab_context.get('current_tab_url', 'unknown')})"
-                return {
-                    "success": True,
-                    "message": message,
-                    "tab_context": tab_context
-                }
-            else:
-                return {
-                    "success": False,
-                    "message": "Failed to switch back (no previous tab exists).",
-                    "tab_context": {}
-                }
-        except Exception as e:
-            logging.error(f"Switch back tab action failed: {str(e)}")
-            return {
-                "success": False,
-                "message": f"Switch back tab failed with an exception: {e}",
-                "tab_context": {}
-            }
-
+    
     async def _execute_mouse(self, action):
         """Unified mouse action supporting move and wheel.
 

@@ -78,6 +78,7 @@ class ElementKey(Enum):
 DEFAULT_OUTPUT_TEMPLATE = [
     ElementKey.TAG_NAME.value,
     ElementKey.INNER_TEXT.value,
+    ElementKey.ATTRIBUTES.value,  # Include attributes to prevent LLM hallucinations about target="_blank"
     ElementKey.CENTER_X.value,
     ElementKey.CENTER_Y.value
 ]
