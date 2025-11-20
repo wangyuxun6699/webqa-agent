@@ -21,7 +21,6 @@ class LLMPrompt:
     - **GoBack**: Navigate to previous page in browser history
     - **GoToPage**: Navigate to specific URL
     - **Sleep**: Wait for specified duration
-    - **Screenshot**: Capture current page state
 
     **Critical Rule**: ALWAYS plan these actions when instructed, even if:
     - pageDescription is empty
@@ -63,7 +62,6 @@ class LLMPrompt:
     - **GoBack**: Navigate to previous page in browser history
     - **GoToPage**: Navigate to specific URL
     - **Sleep**: Wait for specified duration
-    - **Screenshot**: Capture current page state
 
     **Forbidden (DOM-Dependent)** - These require interactive elements:
     - **Tap, Hover, Input, Clear**: Require clickable/editable DOM elements

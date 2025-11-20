@@ -1528,7 +1528,6 @@ def _is_operation_page_agnostic(step_type: str, instruction: str) -> bool:
 
     Page-agnostic operations don't depend on DOM elements and can execute on PDF/plugin pages:
     - Browser navigation: GoBack, GoForward, GoToPage, Sleep
-    - Screenshot: Screenshot (captures rendered pixels, doesn't need DOM)
     - UX verification: UX_Verify (already implements screenshot fallback)
 
     Args:
@@ -1549,9 +1548,7 @@ def _is_operation_page_agnostic(step_type: str, instruction: str) -> bool:
 
     # Priority 1: Direct action type detection (most reliable)
     # Check if instruction contains action type names directly
-    for action_type in [ActionType.GO_BACK, ActionType.GET_NEW_PAGE,
-                       ActionType.SWITCH_BACK_TAB, ActionType.SLEEP,
-                       ActionType.SCREENSHOT]:
+    for action_type in [ActionType.GO_BACK, ActionType.SLEEP]:
         if action_type in instruction:
             logging.debug(f"Page-agnostic action detected via action type: {action_type}")
             return True

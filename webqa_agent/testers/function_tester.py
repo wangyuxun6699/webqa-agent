@@ -590,7 +590,7 @@ class UITester:
         # Add special guidance if:
         # 1. Page is unsupported (PDF, plugin, etc.) - always show guidance
         # 2. Operation is page-agnostic - ALWAYS show guidance (regardless of DOM state)
-        # Rationale: Page-agnostic operations (GoBack, GoToPage, Sleep, Screenshot)
+        # Rationale: Page-agnostic operations (GoBack, GoToPage, Sleep)
         # fundamentally don't require DOM elements, so guidance should always be shown
         should_add_guidance = (
             page_status == "UNSUPPORTED_PAGE" or
@@ -621,7 +621,7 @@ class UITester:
                 "",
                 "**ALLOWED ACTIONS** (work at browser level, no DOM needed):",
                 "  - GoBack, GoToPage: Browser navigation",
-                "  - Sleep, Screenshot: Utility operations",
+                "  - Sleep: Utility operations",
                 "",
                 "**FORBIDDEN ACTIONS** (require DOM elements):",
                 "  - Tap, Input, Hover, Scroll, SelectDropdown",
@@ -974,14 +974,14 @@ class UITester:
     def _is_instruction_page_agnostic(self, test_step: str) -> bool:
         """Check if instruction likely represents a page-agnostic operation.
 
-        This is a heuristic check before action execution to determine if an operation
-        can execute on unsupported page types (PDF, plugin, download pages).
+        Uses priority-based detection to prevent false positives:
+        1. DOM operations (HIGHEST PRIORITY) → NOT page-agnostic
+        2. Action type names → page-agnostic
+        3. Page-agnostic phrases → page-agnostic
 
         Page-agnostic operations work at browser level and don't require DOM elements:
         - Browser navigation: GoBack, GoForward, GoToPage
-        - Utility: Sleep, Screenshot
-
-        Uses both keyword matching and action type detection for robustness.
+        - Utility: Sleep
 
         Args:
             test_step: The test step instruction
@@ -990,34 +990,78 @@ class UITester:
             True if operation is likely page-agnostic, False otherwise
 
         Examples:
-            >>> self._is_instruction_page_agnostic("Close current tab")
-            True
-            >>> self._is_instruction_page_agnostic("Switch back to parent tab")
-            True
-            >>> self._is_instruction_page_agnostic("Click on button")
-            False
+            >>> self._is_instruction_page_agnostic("Tap button to switch back")
+            False  # "Tap" indicates DOM operation
+            >>> self._is_instruction_page_agnostic("Go back to previous page")
+            True   # Legitimate navigation
+            >>> self._is_instruction_page_agnostic("Click the back button")
+            False  # "Click" indicates DOM operation
         """
-        # Get centralized keywords from action_types module
-        # This eliminates code duplication and ensures consistency
-        PAGE_AGNOSTIC_KEYWORDS = get_page_agnostic_keywords()
-
-        # Normalize instruction for matching
+        # Normalize instruction for case-insensitive matching
         instruction_lower = test_step.lower().replace('_', ' ').replace('-', ' ')
 
-        # Check if instruction contains action type names directly
-        # (handles cases where LLM uses action type in description)
-        for action_type in [ActionType.GO_BACK, ActionType.GET_NEW_PAGE,
-                           ActionType.SWITCH_BACK_TAB, ActionType.SLEEP,
-                           ActionType.SCREENSHOT]:
-            if action_type in test_step:
-                logging.debug(f"Detected page-agnostic action type '{action_type}' in instruction")
+        # ========================================================================
+        # PRIORITY 1: Check for explicit DOM operations (HIGHEST PRIORITY)
+        # ========================================================================
+        # If instruction explicitly mentions DOM operations, it's NOT page-agnostic
+        # This prevents false positives from ambiguous keywords like "back"
+        DOM_OPERATION_INDICATORS = [
+            # Click/Tap operations
+            'tap', 'click', 'press', 'touch',
+            # Input operations
+            'input', 'type', 'enter', 'fill',
+            # Selection operations
+            'select', 'choose', 'dropdown',
+            # Mouse operations
+            'hover', 'mouse over',
+            # Scroll operations
+            'scroll', 'swipe',
+            # Drag operations
+            'drag', 'drop',
+            # Upload operations
+            'upload', 'attach',
+            # UI state changes (these require DOM interaction)
+            'toggle', 'switch',  # e.g., "toggle button"
+            'check', 'uncheck',  # checkboxes
+            'expand', 'collapse',  # accordions
+        ]
+
+        for dom_keyword in DOM_OPERATION_INDICATORS:
+            if dom_keyword in instruction_lower:
+                logging.debug(
+                    f"DOM operation '{dom_keyword}' detected in '{test_step[:60]}...' "
+                    f"→ instruction is NOT page-agnostic"
+                )
+                return False
+
+        # ========================================================================
+        # PRIORITY 2: Check for action type names in instruction
+        # ========================================================================
+        # Handle cases where LLM uses action type directly in description
+        for action_type in [ActionType.GO_BACK, ActionType.SLEEP]:
+            # Case-insensitive check (handles "GoBack", "goback", "go back")
+            if action_type.lower() in instruction_lower:
+                logging.debug(
+                    f"Action type '{action_type}' detected in '{test_step[:60]}...' "
+                    f"→ instruction IS page-agnostic"
+                )
                 return True
 
-        # Check keywords in instruction
+        # ========================================================================
+        # PRIORITY 3: Check for page-agnostic phrases
+        # ========================================================================
+        # Use refined keyword list with contextual phrases only
+        PAGE_AGNOSTIC_KEYWORDS = get_page_agnostic_keywords()
+
         for keyword in PAGE_AGNOSTIC_KEYWORDS:
             if keyword in instruction_lower:
-                logging.debug(f"Detected page-agnostic keyword '{keyword}' in instruction")
+                logging.debug(
+                    f"Page-agnostic keyword '{keyword}' detected in '{test_step[:60]}...' "
+                    f"→ instruction IS page-agnostic"
+                )
                 return True
 
-        # Default: assume DOM-dependent (safe default)
+        # ========================================================================
+        # DEFAULT: Assume DOM-dependent (safe default)
+        # ========================================================================
         return False

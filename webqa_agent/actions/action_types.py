@@ -39,7 +39,6 @@ class ActionType(str, Enum):
     GO_BACK = "GoBack"
     GO_TO_PAGE = "GoToPage"
     SLEEP = "Sleep"
-    SCREENSHOT = "Screenshot"
 
 
 # Page-agnostic actions set (can execute on PDF/plugin pages)
@@ -47,7 +46,6 @@ class ActionType(str, Enum):
 PAGE_AGNOSTIC_ACTIONS: Set[str] = {
     ActionType.GO_BACK,
     ActionType.SLEEP,
-    ActionType.SCREENSHOT,
 }
 
 
@@ -79,18 +77,6 @@ ACTION_METADATA: Dict[str, Dict] = {
             "wait for",
         ],
         "description": "Pauses execution for specified duration",
-    },
-    ActionType.SCREENSHOT: {
-        "is_page_agnostic": True,
-        "requires_dom": False,
-        "requires_target": False,
-        "default_phrase": "Capture screenshot",
-        "aliases": [
-            "screenshot",
-            "capture screen",
-            "take screenshot",
-        ],
-        "description": "Captures screenshot of current page",
     },
 }
 
@@ -211,14 +197,16 @@ def get_page_agnostic_keywords() -> list:
         Keywords are lowercase and normalized (spaces, no underscores/hyphens)
         for case-insensitive matching. Calling code should normalize instructions
         to lowercase and replace underscores/hyphens with spaces before matching.
+
+        IMPORTANT: Use only contextual phrases, not standalone words that appear
+        in multiple contexts. For example, use "go back" instead of "back" to avoid
+        false positives in phrases like "switch back", "bring back", "back button".
     """
     return [
-        # GoBack variations
-        'goback', 'go back', 'navigate back', 'browser back', 'back',
-        # GoForward variations
-        'goforward', 'go forward', 'forward',
-        # Sleep variations
-        'sleep', 'wait', 'wait for', 'pause',
-        # Screenshot variations
-        'screenshot', 'capture', 'capture screen', 'take screenshot',
+        # GoBack variations - ONLY contextual phrases (removed standalone "back")
+        'goback', 'go back', 'navigate back', 'browser back', 'previous page',
+        # GoForward variations - ONLY contextual phrases (removed standalone "forward")
+        'goforward', 'go forward', 'navigate forward', 'next page',
+        # Sleep variations - removed "wait" (too generic), kept "wait for"
+        'sleep', 'wait for', 'pause',
     ]
