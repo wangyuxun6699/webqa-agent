@@ -370,7 +370,12 @@ class UITester:
             f"assertion: {assertion}", page_info, enhanced_prompt, page_structure
         )
 
-    async def verify(self, assertion: str, execution_context: Optional[Dict[str, Any]] = None) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    async def verify(
+        self,
+        assertion: str,
+        execution_context: Optional[Dict[str, Any]] = None,
+        focus_region: Optional[str] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Execute AI-driven assertion verification.
 
         Args:
@@ -383,6 +388,7 @@ class UITester:
                                  "completed_steps": [...],
                                  "failed_steps": [...]
                              }
+            focus_region: Optional page region to focus verification on (e.g., "header navigation", "main content")
 
         Returns:
             Tuple (step_dict, model_output)
@@ -433,45 +439,168 @@ class UITester:
                 self.add_step_data(skip_step, step_type="assertion")
                 return skip_step, skip_result
 
+            # ========================================================================
+            # SCREENSHOT EXTRACTION AND MODE DETECTION
+            # ========================================================================
 
-            page_url, page_title = await self.driver.get_url()
-            logging.debug(f"verification page url: {page_url}, title: {page_title}")
-            # Crawl current page
-            dp = DeepCrawler(self.page)
-            await dp.crawl(highlight=True, filter_text=True, viewport_only=True)
+            # Extract before/after screenshots from execution_context
+            before_screenshot = None
+            after_screenshot = None
 
-            marker_screenshot = await self._actions.b64_page_screenshot(
-                full_page=False,
-                file_name="verification_marker",
-                context="test"
-            )
-            await dp.remove_marker()
+            if execution_context and execution_context.get("last_action"):
+                result = execution_context["last_action"].get("result", {})
+                before_screenshot = result.get("before_screenshot")
+                after_screenshot = result.get("after_screenshot")
 
-            screenshot = await self._actions.b64_page_screenshot(
-                full_page=False,
-                file_name="verification_clean",
-                context="test"
-            )
+            # Validate screenshots if present
+            if before_screenshot and not isinstance(before_screenshot, str):
+                logging.warning("before_screenshot is not a string, treating as missing")
+                before_screenshot = None
+            if after_screenshot and not isinstance(after_screenshot, str):
+                logging.warning("after_screenshot is not a string, treating as missing")
+                after_screenshot = None
 
-            # Get page structure
-            await dp.crawl(highlight=False, filter_text=True, viewport_only=True)
-            page_structure = dp.get_text()
-
-            # Prepare LLM input (context-aware if context available)
-            page_info = f"url: {page_url}, title: {page_title}"
-            if execution_context:
-                logging.debug("Using context-aware verification prompt")
-                user_prompt = self._build_context_aware_prompt(assertion, page_info, page_structure, execution_context)
+            # Determine mode: comparison (both available) or fallback (either missing)
+            if before_screenshot and after_screenshot:
+                mode = "comparison"
+                logging.info("Screenshot comparison mode: ENABLED (both before/after screenshots available)")
             else:
-                logging.debug("Using standard verification prompt")
-                # Prepare LLM input
-                user_prompt = self._prepare_prompt_verify(
-                    f"assertion: {assertion}", page_info, LLMPrompt.verification_prompt, page_structure
+                mode = "fallback"
+                if before_screenshot:
+                    logging.info("Screenshot comparison mode: FALLBACK (only before screenshot available)")
+                elif after_screenshot:
+                    logging.info("Screenshot comparison mode: FALLBACK (only after screenshot available)")
+                else:
+                    logging.info("Screenshot comparison mode: FALLBACK (no before/after screenshots available)")
+
+            # Normalize focus_region: treat empty string as None
+            if focus_region is not None and not focus_region.strip():
+                focus_region = None
+                logging.debug("Empty focus_region provided, treating as None")
+
+            # ========================================================================
+            # MODE EXECUTION: COMPARISON vs FALLBACK
+            # ========================================================================
+
+            if mode == "comparison":
+                # ====================================================================
+                # COMPARISON MODE: Use before + after screenshots
+                # ====================================================================
+                logging.debug("Using comparison mode with before/after screenshots")
+
+                # Prepare images list for LLM (chronological order: before, then after)
+                images_for_llm = [before_screenshot, after_screenshot]
+
+                # Get page info
+                page_url, page_title = await self.driver.get_url()
+                logging.debug(f"verification page url: {page_url}, title: {page_title}")
+
+                # Crawl current page for text structure
+                dp = DeepCrawler(self.page)
+                await dp.crawl(highlight=False, filter_text=True, viewport_only=False)
+                page_structure = dp.get_text()
+
+                # Prepare LLM input with comparison instructions
+                page_info = f"url: {page_url}, title: {page_title}"
+
+                # Add focus region guidance if specified
+                region_guidance = ""
+                if focus_region:
+                    region_guidance = f"\n\n**FOCUS REGION**: {focus_region}\n**INSTRUCTION**: Pay primary attention to elements within the '{focus_region}' region when evaluating the assertion."
+                    logging.debug(f"Adding focus region guidance: {focus_region}")
+
+                # Build prompt using dedicated comparison prompts
+                if execution_context:
+                    # Use context-aware comparison prompt
+                    comparison_base_prompt = LLMPrompt.verification_prompt_with_context_comparison.format(
+                        execution_context=self._format_execution_context(execution_context)
+                    )
+                    user_prompt = self._prepare_prompt_verify(
+                        f"assertion: {assertion}", page_info, comparison_base_prompt, page_structure
+                    )
+                else:
+                    # Use standard comparison prompt
+                    comparison_base_prompt = LLMPrompt.verification_prompt_comparison
+                    user_prompt = self._prepare_prompt_verify(
+                        f"assertion: {assertion}", page_info, comparison_base_prompt, page_structure
+                    )
+
+                # Add region guidance if specified
+                if region_guidance:
+                    user_prompt = user_prompt + region_guidance
+
+                # Store screenshots for step data
+                verification_screenshots = [
+                    {"type": "base64", "data": before_screenshot, "label": "Before Action"},
+                    {"type": "base64", "data": after_screenshot, "label": "After Action"}
+                ]
+
+            else:
+                # ====================================================================
+                # FALLBACK MODE: Capture new screenshot (existing behavior)
+                # ====================================================================
+                logging.debug("Using fallback mode - capturing new screenshot")
+
+                # Get page info
+                page_url, page_title = await self.driver.get_url()
+                logging.debug(f"verification page url: {page_url}, title: {page_title}")
+
+                # Crawl current page
+                dp = DeepCrawler(self.page)
+                await dp.crawl(highlight=False, filter_text=True, viewport_only=False)
+
+                # Capture new screenshot
+                screenshot = await self._actions.b64_page_screenshot(
+                    full_page=True,
+                    file_name="verification_clean",
+                    context="test"
                 )
 
-            images_for_llm = [img for img in [marker_screenshot, screenshot] if img]
+                # Prepare images for LLM (single screenshot)
+                images_for_llm = [screenshot] if screenshot else None
+
+                # Get page structure
+                page_structure = dp.get_text()
+
+                # Prepare LLM input (standard or context-aware, NO comparison instructions)
+                page_info = f"url: {page_url}, title: {page_title}"
+
+                # Add focus region guidance if specified
+                region_guidance = ""
+                if focus_region:
+                    region_guidance = f"\n\n**FOCUS REGION**: {focus_region}\n**INSTRUCTION**: Pay primary attention to elements within the '{focus_region}' region when evaluating the assertion. While you should maintain awareness of the full page context, prioritize verification of elements and content specifically within this region."
+                    logging.debug(f"Adding focus region guidance: {focus_region}")
+
+                if execution_context:
+                    logging.debug("Using context-aware verification prompt")
+                    user_prompt = self._build_context_aware_prompt(assertion, page_info, page_structure, execution_context)
+                    if region_guidance:
+                        user_prompt = user_prompt + region_guidance
+                else:
+                    logging.debug("Using standard verification prompt")
+                    base_prompt = LLMPrompt.verification_prompt
+                    if region_guidance:
+                        base_prompt = base_prompt + region_guidance
+                    user_prompt = self._prepare_prompt_verify(
+                        f"assertion: {assertion}", page_info, base_prompt, page_structure
+                    )
+
+                # Store screenshot for step data
+                verification_screenshots = [{"type": "base64", "data": screenshot}] if screenshot else []
+
+            # ========================================================================
+            # LLM CALL (unified for both modes)
+            # ========================================================================
+            # Select appropriate system prompt based on mode
+            if mode == "comparison":
+                system_prompt = LLMPrompt.verification_system_prompt_comparison
+                logging.debug("Using comparison-specific system prompt")
+            else:
+                system_prompt = LLMPrompt.verification_system_prompt
+                logging.debug("Using standard system prompt")
+
             result = await self.llm.get_llm_response(
-                LLMPrompt.verification_system_prompt, user_prompt, images=images_for_llm if images_for_llm else None
+                system_prompt, user_prompt, images=images_for_llm
             )
 
             # Process result
@@ -505,11 +634,8 @@ class UITester:
             }]
             verification_step = {
                 "description": f"verify: {assertion}",
-                "actions": verify_action_list,  # Assertion steps usually don't contain actions
-                "screenshots": (
-                    ([{"type": "base64", "data": marker_screenshot}] if marker_screenshot else []) +
-                    ([{"type": "base64", "data": screenshot}] if screenshot else [])
-                ),
+                "actions": verify_action_list,
+                "screenshots": verification_screenshots,  # Use mode-specific screenshots
                 "modelIO": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
                 "status": status_str,
                 "start_time": start_time,
@@ -688,6 +814,13 @@ class UITester:
         execute_results = []
         action_count = len(plan_json.get("actions", []))
 
+        # Capture initial screenshot BEFORE any actions (plan-level before state)
+        initial_screenshot = await self._actions.b64_page_screenshot(
+            full_page=True,
+            file_name="plan_initial_screenshot",
+            context="verify"
+        )
+
         for index, action in enumerate(plan_json.get("actions", []), 1):
             action_desc = f"{action.get('type', 'Unknown')}"
             logging.debug(f"Executing step {index}/{action_count}: {action_desc}")
@@ -734,15 +867,47 @@ class UITester:
 
                 if not success:
                     logging.error(f"Action {index} failed: {message}")
+                    # Capture final screenshot even on failure
+                    final_screenshot = await self._actions.b64_page_screenshot(
+                        full_page=True,
+                        file_name="plan_final_screenshot_failed",
+                        context="verify"
+                    )
+                    # Add plan-level screenshots to failure result
+                    action_result["before_screenshot"] = initial_screenshot
+                    action_result["after_screenshot"] = final_screenshot
                     return execute_results, action_result
 
             except Exception as e:
                 error_msg = f"Action {index} failed with error: {str(e)}"
                 logging.error(error_msg)
-                failure_result = {"success": False, "message": f"Exception occurred: {str(e)}", "screenshot": None}
+                # Capture final screenshot even on exception
+                try:
+                    final_screenshot = await self._actions.b64_page_screenshot(
+                        full_page=True,
+                        file_name="plan_final_screenshot_exception",
+                        context="verify"
+                    )
+                except:
+                    final_screenshot = None
+
+                failure_result = {
+                    "success": False,
+                    "message": f"Exception occurred: {str(e)}",
+                    "screenshot": None,
+                    "before_screenshot": initial_screenshot,
+                    "after_screenshot": final_screenshot
+                }
                 return execute_results, failure_result
 
         logging.debug("All actions executed successfully")
+        # Capture final screenshot AFTER all actions (plan-level after state)
+        final_screenshot = await self._actions.b64_page_screenshot(
+            full_page=True,
+            file_name="plan_final_screenshot",
+            context="verify"
+        )
+
         post_action_ss = await self._actions.b64_page_screenshot(
             file_name="final_success",
             context="test"
@@ -751,6 +916,8 @@ class UITester:
             "success": True,
             "message": "All actions executed successfully",
             "screenshot": post_action_ss,
+            "before_screenshot": initial_screenshot,
+            "after_screenshot": final_screenshot,
         }
 
     def get_monitoring_results(self) -> Dict[str, Any]:

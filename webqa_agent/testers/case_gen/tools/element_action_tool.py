@@ -424,6 +424,23 @@ class UIAssertionSchema(BaseModel):
         )
     )
 
+    focus_region: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional page region to focus verification on. "
+            "When specified, directs the LLM to pay primary attention to elements within this region. "
+            "Use semantic region descriptions that match visual layout. "
+            "Examples: "
+            "'header navigation bar', "
+            "'main content area', "
+            "'sidebar widgets', "
+            "'shopping cart summary', "
+            "'login form section', "
+            "'footer links'. "
+            "If not specified, verification considers the entire visible page."
+        )
+    )
+
 
 class UIAssertTool(BaseTool):
     """A tool to perform functional UI assertions via a UITester instance."""
@@ -440,13 +457,20 @@ class UIAssertTool(BaseTool):
     def _run(self, assertion: str) -> str:
         raise NotImplementedError("Use arun for asynchronous execution.")
 
-    async def _arun(self, assertion: str) -> str:
+    async def _arun(self, assertion: str, focus_region: Optional[str] = None) -> str:
         """Executes a UI assertion using the UITester and returns a formatted
-        verification result."""
+        verification result.
+
+        Args:
+            assertion: The assertion statement to verify
+            focus_region: Optional page region to focus verification on
+        """
         if not self.ui_tester_instance:
             return "[FAILURE] Error: UITester instance not provided for assertion."
 
         logging.debug(f"Executing UI assertion: {assertion}")
+        if focus_region:
+            logging.debug(f"Focus region specified: {focus_region}")
 
         try:
             # Build execution context from instance state (context-aware verification)
@@ -468,7 +492,11 @@ class UIAssertTool(BaseTool):
                 }
                 logging.debug("Passing execution context to verify()")
 
-            execution_steps, result = await self.ui_tester_instance.verify(assertion, execution_context)
+            execution_steps, result = await self.ui_tester_instance.verify(
+                assertion,
+                execution_context,
+                focus_region=focus_region
+            )
 
             if not isinstance(result, dict):
                 return f"[FAILURE] Assertion error: Invalid response format from UITester.verify(). Expected dict, got {type(result)}"
