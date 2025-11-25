@@ -802,15 +802,37 @@ class ActionHandler:
                 if (baseTag) baseTag.setAttribute('target', '_self');
             }
 
-            // Layer 2: Override window.open() to redirect to current tab
+            // Layer 1.5: Backup history creation for link clicks
+            if (!window.__webqa_link_click_intercepted) {
+                document.addEventListener('click', function(e) {
+                    let target = e.target;
+                    while (target && target.tagName !== 'A') {
+                        target = target.parentElement;
+                        if (!target || target === document.body) return;
+                    }
+                    if (!target || target.tagName !== 'A') return;
+
+                    const href = target.href;
+                    if (!href || href.startsWith('javascript:') || href.startsWith('#') || href === window.location.href) return;
+
+                    try {
+                        window.history.pushState({webqa_back: window.location.href}, '', window.location.href);
+                    } catch (err) {}
+                }, true);
+                window.__webqa_link_click_intercepted = true;
+            }
+
+            // Layer 2: Override window.open() to redirect to current tab with history preservation
             if (!window.__webqa_window_open_intercepted) {
                 const originalWindowOpen = window.open;
                 window.open = function(url, target, features) {
-                    console.log('[WebQA] Intercepted window.open() call, redirecting to current tab:', url);
                     if (url) {
+                        try {
+                            window.history.pushState({webqa_back: window.location.href}, '', window.location.href);
+                        } catch (e) {}
                         window.location.href = url;
                     }
-                    return window;  // Return current window instead of new window
+                    return window;
                 };
                 window.__webqa_window_open_intercepted = true;
             }
@@ -880,6 +902,23 @@ class ActionHandler:
                 playwright_error=str(e)
             )
             return False
+
+        # Explicit history entry for GoBack support
+        try:
+            tag_name = element.get('tagName', '').lower()
+            href = element.get('href', '')
+            if tag_name == 'a' and href and not href.startswith(('javascript:', '#')):
+                current_url = page.url
+                await page.evaluate(f'''
+                    window.history.pushState(
+                        {{webqa_back: true, from: "{current_url}"}},
+                        "",
+                        "{current_url}"
+                    );
+                ''')
+                logging.debug(f'History entry created for GoBack: {current_url}')
+        except Exception as e:
+            logging.warning(f'Failed to create history entry: {e}')
 
         # Ensure element is in viewport before clicking (for full-page planning mode)
         if not await self.ensure_element_in_viewport(id):
@@ -1477,13 +1516,51 @@ class ActionHandler:
             raise
 
     async def go_back(self) -> bool:
-        """Navigate back to the previous page."""
+        """Navigate back with cross-origin fallback.
+
+        Reference: https://github.com/microsoft/playwright/issues/35039
+        """
         try:
-            await self.page.go_back()
-            logging.debug('Navigated back to the previous page.')
-            return True
+            page = self._get_current_page()
+            url_before = page.url
+            logging.info(f'GoBack: Starting from {url_before}')
+
+            # Strategy 1: Playwright API
+            try:
+                await page.go_back(wait_until='domcontentloaded', timeout=5000)
+                url_after = page.url
+                if url_before != url_after:
+                    logging.info(f'GoBack: Strategy 1 succeeded: {url_before} → {url_after}')
+                    return True
+                logging.info('GoBack: Strategy 1 failed, trying fallback...')
+            except Exception as e:
+                logging.info(f'GoBack: Strategy 1 exception: {e}, trying fallback...')
+
+            # Strategy 2: Browser-level JS API (cross-origin compatible)
+            try:
+                logging.info('GoBack: Trying Strategy 2 (window.history.back)...')
+                await page.evaluate('window.history.back()')
+                try:
+                    await page.wait_for_url(lambda url: url != url_before, timeout=5000)
+                except Exception:
+                    try:
+                        await page.wait_for_load_state('domcontentloaded', timeout=3000)
+                    except Exception:
+                        await asyncio.sleep(1.0)
+
+                url_after = page.url
+                if url_before != url_after:
+                    logging.info(f'GoBack: Strategy 2 succeeded: {url_before} → {url_after}')
+                    return True
+
+                logging.warning(f'GoBack: Both strategies failed. URL unchanged: {url_after}')
+                return False
+            except Exception as e:
+                logging.warning(f'GoBack: Strategy 2 exception: {e}')
+                return False
+
         except Exception as e:
-            logging.error(f'Failed to navigate back: {e}')
+            logging.error(f'GoBack: Unexpected error: {e}')
             return False
 
 
