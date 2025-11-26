@@ -1,6 +1,5 @@
 import logging
 
-import httpx
 from openai import AsyncOpenAI
 
 
@@ -11,7 +10,6 @@ class LLMAPI:
         self.model = self.llm_config.get("model")
         self.filter_model = self.llm_config.get("filter_model", self.model)  # For two-stage architecture
         self.client = None
-        self._client = None  # httpx client
 
     async def initialize(self):
         if self.api_type == "openai":
@@ -28,10 +26,6 @@ class LLMAPI:
 
         return self
 
-    async def _get_client(self):
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=60.0)
-        return self._client
 
     async def get_llm_response(
         self,
@@ -45,21 +39,21 @@ class LLMAPI:
         reasoning=None,
         text=None,
     ):
-        """Get LLM response with support for GPT-5 reasoning parameters.
+        """Get LLM response with support for GPT-5 Responses API.
         
         Args:
-            system_prompt: System prompt for the model
-            prompt: User prompt
+            system_prompt: System prompt (used as 'instructions' in Responses API)
+            prompt: User prompt (used as 'input' in Responses API)
             images: Optional base64 image(s) for vision models
-            temperature: Sampling temperature (0-2). Note: Only supported with GPT-5.1 when reasoning_effort="none"
-            top_p: Nucleus sampling parameter. Note: Only supported with GPT-5.1 when reasoning_effort="none"
+            temperature: Sampling temperature (0-2)
+            top_p: Nucleus sampling parameter
             max_tokens: Maximum output tokens
             model_override: Temporary model override (e.g., for two-stage architecture)
-            reasoning: Reasoning effort control. Can be:
+            reasoning: Reasoning effort control for GPT-5 models. Can be:
                 - dict: {"effort": "none"|"low"|"medium"|"high"}
                 - str: "none"|"low"|"medium"|"high"
-                - None: Uses config or defaults ("none" for gpt-5.1, "low" for others)
-            text: Output verbosity control. Can be:
+                - None: Uses config or defaults ("none" for gpt-5.1, "medium" for gpt-5/mini/nano)
+            text: Output verbosity control for GPT-5 models. Can be:
                 - dict: {"verbosity": "low"|"medium"|"high"}
                 - str: "low"|"medium"|"high"
                 - None: Uses config or defaults to "medium"
@@ -68,68 +62,53 @@ class LLMAPI:
             str: Model response content
             
         Note:
-            - GPT-5.1 supports reasoning_effort="none" for low-latency responses
-            - Other reasoning models (o3, o4, etc.) default to "low" and support low/medium/high
-            - Temperature/top_p are automatically disabled for GPT-5.1 when reasoning_effort != "none"
+            - All GPT-5 family models (gpt-5, gpt-5.1, gpt-5-mini, gpt-5-nano) use Responses API
+            - Other models use Chat Completions API
         """
-        # Allow temporary model override for two-stage architecture (e.g., lightweight model for filtering)
+        # Allow temporary model override for two-stage architecture
         actual_model = model_override or self.model
-        model_input = {"model": actual_model, "api_type": self.api_type}
         if self.api_type == "openai" and self.client is None:
             await self.initialize()
 
+        # Determine which API to use based on model
+        use_responses_api = self._use_responses_api(actual_model)
+
         try:
-            messages = self._create_messages(system_prompt, prompt)
-            # Handle images
-            if images and self.api_type == "openai":
-                self._handle_images_openai(messages, images)
-                model_input["images"] = "included"
-            # Choose and call API
-            if self.api_type == "openai":
-                # Resolve parameters: method args > config > defaults
-                resolved_temperature = temperature if temperature is not None else self.llm_config.get("temperature", 0.1)
+            # Resolve common parameters
+            resolved_max_tokens = max_tokens if max_tokens is not None else self.llm_config.get("max_tokens")
+
+            if use_responses_api:
+                # GPT-5 models -> Responses API
+                # Note: temperature/top_p only supported with GPT-5.1 + effort="none"
+                # Only pass if explicitly configured (no default)
+                resolved_temperature = temperature if temperature is not None else self.llm_config.get("temperature")
                 resolved_top_p = top_p if top_p is not None else self.llm_config.get("top_p")
-                resolved_max_tokens = max_tokens if max_tokens is not None else self.llm_config.get("max_tokens")
                 
-                # Resolve GPT-5 parameters (only for gpt-5/gpt-5.1 series)
-                model_lower = actual_model.lower() if actual_model else ""
-                is_gpt5_family = model_lower.startswith("gpt-5")
-                is_gpt51 = model_lower.startswith("gpt-5.1")
-                
-                # Only apply reasoning/verbosity for GPT-5 family models
-                resolved_reasoning_effort = None
-                resolved_verbosity = None
-                
-                if is_gpt5_family:
-                    # GPT-5.1 defaults to "none" (low-latency), GPT-5 defaults to "low"
-                    default_reasoning = "none" if is_gpt51 else "low"
-                    resolved_reasoning_effort = self._resolve_param(reasoning, "reasoning", "effort", default_reasoning)
-                    resolved_verbosity = self._resolve_param(text, "text", "verbosity", "medium")
-
-                    # GPT-5.1 compatibility: temperature/top_p only allowed when reasoning_effort=none
-                    if is_gpt51 and resolved_reasoning_effort not in ["none", None]:
-                        if resolved_temperature is not None or resolved_top_p is not None:
-                            logging.warning(
-                                "GPT-5.1 with reasoning_effort=%s: removing temperature/top_p (only allowed with 'none')",
-                                resolved_reasoning_effort
-                            )
-                            resolved_temperature = None
-                            resolved_top_p = None
-
-                logging.debug(
-                    "Resolved params - temperature: %s, top_p: %s, max_tokens: %s, reasoning_effort: %s, verbosity: %s",
-                    resolved_temperature, resolved_top_p, resolved_max_tokens,
-                    resolved_reasoning_effort, resolved_verbosity
-                )
-                
-                result = await self._call_openai(
-                    messages,
+                result = await self._call_responses_api(
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                    images=images,
                     temperature=resolved_temperature,
                     top_p=resolved_top_p,
                     max_tokens=resolved_max_tokens,
                     model=actual_model,
-                    reasoning_effort=resolved_reasoning_effort,
-                    verbosity=resolved_verbosity,
+                    reasoning=reasoning,
+                    text=text,
+                )
+            else:
+                # Non-GPT-5 models -> Chat Completions API
+                # Default temperature to 0.1 for Chat Completions
+                resolved_temperature = temperature if temperature is not None else self.llm_config.get("temperature", 0.1)
+                resolved_top_p = top_p if top_p is not None else self.llm_config.get("top_p")
+                
+                result = await self._call_chat_completions_api(
+                    system_prompt=system_prompt,
+                    prompt=prompt,
+                    images=images,
+                    temperature=resolved_temperature,
+                    top_p=resolved_top_p,
+                    max_tokens=resolved_max_tokens,
+                    model=actual_model,
                 )
 
             return result
@@ -137,34 +116,49 @@ class LLMAPI:
             logging.error(f"LLMAPI.get_llm_response encountered error: {e}")
             raise
 
-    def _create_messages(self, system_prompt, prompt):
-        if self.api_type == "openai":
-            return [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": [{"type": "text", "text": prompt}]},
-            ]
-        else:
-            raise ValueError("Invalid api_type. Choose 'openai'.")
+    def _use_responses_api(self, model_name: str) -> bool:
+        """Determine whether to use the Responses API for the given model.
+        
+        Responses API is used for all GPT-5 family models:
+        - gpt-5 (default reasoning effort: medium)
+        - gpt-5.1 (default reasoning effort: none for low-latency)
+        - gpt-5-mini
+        - gpt-5-nano
+        
+        All GPT-5 models support reasoning.effort and text.verbosity parameters.
+        """
+        if not model_name:
+            return False
+        model_lower = model_name.lower()
+        return model_lower.startswith("gpt-5")
 
-    def _handle_images_openai(self, messages, images):
-        """Helper to append image data to messages for OpenAI."""
-        try:
-            if isinstance(images, str):
-                if images.startswith("data:image"):
-                    image_message = {"type": "image_url", "image_url": {"url": f"{images}", "detail": "low"}}
-                    messages[1]["content"].append(image_message)
-            elif isinstance(images, list):
-                for image_base64 in images:
-                    image_message = {"type": "image_url", "image_url": {"url": f"{image_base64}", "detail": "low"}}
-                    messages[1]["content"].append(image_message)
-            else:
-                raise ValueError("Invalid type for 'images'. Expected a base64 string or a list of base64 strings.")
-        except Exception as e:
-            logging.error(f"Error while handling images for OpenAI: {e}")
-            raise ValueError(f"Failed to process images for OpenAI. Error: {e}")
+    def _resolve_reasoning_params(self, model: str, reasoning, text):
+        """Resolve reasoning and text parameters for GPT-5 models.
+        
+        All GPT-5 family models support:
+        - reasoning.effort: "none" | "low" | "medium" | "high"
+        - text.verbosity: "low" | "medium" | "high"
+        
+        Defaults:
+        - GPT-5.1: reasoning effort = "none" (low-latency), verbosity = "medium"
+        - GPT-5/GPT-5-mini/GPT-5-nano: reasoning effort = "medium", verbosity = "medium"
+        """
+        model_lower = model.lower() if model else ""
+        is_gpt51 = model_lower.startswith("gpt-5.1")
+        
+        # GPT-5.1 defaults to "none" (low-latency), GPT-5/mini/nano defaults to "medium"
+        default_reasoning = "none" if is_gpt51 else "medium"
+        
+        # Resolve reasoning effort
+        resolved_effort = self._resolve_param(reasoning, "reasoning", "effort", default_reasoning)
+        
+        # Resolve text verbosity (all GPT-5 models default to "medium")
+        resolved_verbosity = self._resolve_param(text, "text", "verbosity", "medium")
+        
+        return resolved_effort, resolved_verbosity
 
     def _resolve_param(self, override, config_key, sub_key, default):
-        """Generic parameter resolver: override > config[key][sub_key] > config[sub_key] > default."""
+        """Generic parameter resolver: override > config[key][sub_key] > default."""
         # Check override (supports dict with sub_key or direct value)
         if override is not None:
             if isinstance(override, dict):
@@ -181,67 +175,239 @@ class LLMAPI:
             if value:
                 return value
         
-        # Check config flat key (e.g., config.reasoning_effort)
-        flat_key = f"{config_key}_{sub_key}" if config_key != sub_key else sub_key
-        value = self.llm_config.get(flat_key)
-        if value:
-            return value
-        
         return default
 
-    async def _call_openai(
+    async def _call_responses_api(
         self,
-        messages,
+        system_prompt: str,
+        prompt: str,
+        images=None,
         temperature=None,
         top_p=None,
         max_tokens=None,
         model=None,
-        reasoning_effort=None,
-        verbosity=None,
+        reasoning=None,
+        text=None,
     ):
+        """Call OpenAI Responses API for GPT-5/GPT-5.1 models.
+        
+        Responses API format:
+            response = client.responses.create(
+                model="gpt-5.1",
+                instructions="System prompt here",
+                input="User input here" or [{"role": "user", "content": [...]}],
+                reasoning={"effort": "low"},
+                text={"verbosity": "medium"},
+            )
+        
+        Parameter compatibility:
+            - temperature, top_p, logprobs: ONLY supported with GPT-5.1 + reasoning.effort="none"
+            - Other GPT-5 models (gpt-5, gpt-5-mini, gpt-5-nano) do NOT support these parameters
+            - Use reasoning.effort, text.verbosity, max_output_tokens as alternatives
+        """
         try:
-            # Use provided model or fallback to config model
             actual_model = model or self.llm_config.get("model")
+            model_lower = actual_model.lower() if actual_model else ""
+            
+            # Resolve reasoning parameters
+            resolved_effort, resolved_verbosity = self._resolve_reasoning_params(actual_model, reasoning, text)
+            
+            # Check if temperature/top_p are allowed
+            # ONLY GPT-5.1 with reasoning.effort="none" supports temperature/top_p
+            is_gpt51 = model_lower.startswith("gpt-5.1")
+            supports_sampling_params = is_gpt51 and resolved_effort == "none"
+            
+            if not supports_sampling_params and (temperature is not None or top_p is not None):
+                if is_gpt51:
+                    logging.debug(
+                        "GPT-5.1 with reasoning.effort='%s': temperature/top_p not supported (only allowed with effort='none').",
+                        resolved_effort
+                    )
+                else:
+                    logging.debug(
+                        "Model '%s' does not support temperature/top_p. Use reasoning.effort/text.verbosity instead.",
+                        actual_model
+                    )
+            
+            # Build request kwargs
+            create_kwargs = {
+                "model": actual_model,
+                "instructions": system_prompt,  # System prompt as instructions
+                "timeout": 360,
+            }
+            
+            # Build input - can be simple string or structured with images
+            if images:
+                # With images, use structured input format
+                input_content = [{"type": "input_text", "text": prompt}]
+                self._append_images_to_content(input_content, images)
+                create_kwargs["input"] = [{"role": "user", "content": input_content}]
+            else:
+                # Simple string input
+                create_kwargs["input"] = prompt
+            
+            # Add temperature/top_p ONLY for GPT-5.1 with reasoning.effort="none"
+            if supports_sampling_params:
+                if temperature is not None:
+                    create_kwargs["temperature"] = temperature
+                if top_p is not None:
+                    create_kwargs["top_p"] = top_p
+            
+            # max_output_tokens is always supported for all GPT-5 models
+            if max_tokens is not None:
+                create_kwargs["max_output_tokens"] = max_tokens
+            
+            # Add reasoning and text parameters (all GPT-5 models support these)
+            if resolved_effort is not None:
+                create_kwargs["reasoning"] = {"effort": resolved_effort}
+            if resolved_verbosity is not None:
+                create_kwargs["text"] = {"verbosity": resolved_verbosity}
+
+            logging.debug(
+                "Responses API request - model: %s, temperature: %s, max_output_tokens: %s, reasoning: %s, text: %s",
+                actual_model,
+                create_kwargs.get("temperature"),
+                create_kwargs.get("max_output_tokens"),
+                create_kwargs.get("reasoning"),
+                create_kwargs.get("text"),
+            )
+
+            response = await self.client.responses.create(**create_kwargs)
+            
+            # Extract output text from response
+            content = getattr(response, "output_text", None)
+            logging.debug(f"Responses API response: {content}")
+            if not content:
+                # Fallback: try to extract from output array
+                if hasattr(response, "output") and response.output:
+                    for item in response.output:
+                        if getattr(item, "type", None) == "message":
+                            if hasattr(item, "content") and item.content:
+                                for c in item.content:
+                                    if getattr(c, "type", None) == "output_text":
+                                        content = getattr(c, "text", None)
+                                        break
+                            break
+            if not content:
+                content = str(response)
+                
+            # logging.debug(f"Responses API response received, length: {len(content) if content else 0}")
+            # content = self._clean_response(content)
+            return content
+            
+        except Exception as e:
+            error_msg = f"Responses API request failed for model '{model}': {str(e)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+
+    async def _call_chat_completions_api(
+        self,
+        system_prompt: str,
+        prompt: str,
+        images=None,
+        temperature=None,
+        top_p=None,
+        max_tokens=None,
+        model=None,
+    ):
+        """Call OpenAI Chat Completions API for non-GPT-5 models.
+        
+        Note: This API does NOT support reasoning/text parameters.
+        """
+        try:
+            actual_model = model or self.llm_config.get("model")
+
+            # Build messages
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [{"type": "text", "text": prompt}]},
+            ]
+            
+            # Add images if provided
+            if images:
+                self._append_images_to_messages(messages, images)
 
             create_kwargs = {
                 "model": actual_model,
                 "messages": messages,
                 "timeout": 360,
             }
-            # Always send user/configured temperature when provided (default handled upstream)
+            
             if temperature is not None:
                 create_kwargs["temperature"] = temperature
             if top_p is not None:
                 create_kwargs["top_p"] = top_p
             if max_tokens is not None:
                 create_kwargs["max_tokens"] = max_tokens
-            if reasoning_effort is not None:
-                create_kwargs["reasoning_effort"] = reasoning_effort
-            if verbosity is not None:
-                create_kwargs["verbosity"] = verbosity
 
-            # Log all request parameters for debugging
             logging.debug(
-                "LLM API request - model: %s, temperature: %s, top_p: %s, max_tokens: %s, reasoning_effort: %s, verbosity: %s",
+                "Chat Completions API request - model: %s, temperature: %s, max_tokens: %s",
                 actual_model,
                 create_kwargs.get("temperature"),
-                create_kwargs.get("top_p"),
                 create_kwargs.get("max_tokens"),
-                create_kwargs.get("reasoning_effort"),
-                create_kwargs.get("verbosity")
             )
 
             completion = await self.client.chat.completions.create(**create_kwargs)
             content = completion.choices[0].message.content
-            logging.debug(f"LLM API response: {content}")
-            # Clean response if it's wrapped in JSON code blocks
+            
+            logging.debug(f"Chat Completions API response received, length: {len(content) if content else 0}")
             content = self._clean_response(content)
             return content
+            
         except Exception as e:
-            error_msg = f"LLM API request failed for model '{actual_model}' {str(e)}"
+            error_msg = f"Chat Completions API request failed for model '{model}': {str(e)}"
             logging.error(error_msg)
-            logging.error(f"Request parameters: {create_kwargs.get('model')}, temperature={create_kwargs.get('temperature')}, reasoning_effort={create_kwargs.get('reasoning_effort')}, verbosity={create_kwargs.get('verbosity')}")
             raise ValueError(error_msg)
+
+    def _append_images_to_content(self, content: list, images):
+        """Append images to Responses API content array.
+        
+        Format for Responses API:
+            {"type": "input_image", "image_url": "data:image/..."}
+        """
+        try:
+            if isinstance(images, str):
+                content.append({
+                    "type": "input_image",
+                    "image_url": images,
+                })
+            elif isinstance(images, list):
+                for image_base64 in images:
+                    content.append({
+                        "type": "input_image",
+                        "image_url": image_base64,
+                    })
+            else:
+                raise ValueError("Invalid type for 'images'. Expected a base64 string or a list of base64 strings.")
+        except Exception as e:
+            logging.error(f"Error appending images to Responses API content: {e}")
+            raise
+
+    def _append_images_to_messages(self, messages: list, images):
+        """Append images to Chat Completions API messages.
+        
+        Format for Chat Completions API:
+            {"type": "image_url", "image_url": {"url": "data:image/...", "detail": "low"}}
+        """
+        try:
+            user_content = messages[1]["content"]
+            
+            if isinstance(images, str):
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": images, "detail": "low"}
+                })
+            elif isinstance(images, list):
+                for image_base64 in images:
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": image_base64, "detail": "low"}
+                    })
+            else:
+                raise ValueError("Invalid type for 'images'. Expected a base64 string or a list of base64 strings.")
+        except Exception as e:
+            logging.error(f"Error appending images to Chat Completions messages: {e}")
+            raise
 
     def _clean_response(self, response):
         """Remove JSON code block markers from the response if present."""
@@ -249,7 +415,6 @@ class LLMAPI:
             if response and isinstance(response, str):
                 # Check if response starts with ```json and ends with ```
                 if response.startswith("```json") and response.endswith("```"):
-                    # Remove the markers and return the content
                     logging.debug("Cleaning response: Removing ```json``` markers")
                     return response[7:-3].strip()
                 # Check if it just has ``` without json specification

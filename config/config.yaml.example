@@ -29,9 +29,9 @@ llm_config: # LLM configuration, currently only supports OpenAI SDK compatible f
   # max_tokens: 8192  # Optional, maximum output tokens (supports generating more test cases)
   # GPT-5 family reasoning & text verbosity configuration (optional)
   # reasoning:
-  #   effort: none    # none | low | medium | high (gpt-5.1 recommends 'none' for low-latency)
+  #   effort: none    # none | low | medium | high (gpt-5.1 defaults to 'none' for low-latency)
   # text:
-  #   verbosity: medium  # low | medium | high, default 'medium'
+  #   verbosity: medium  # low | medium | high (default 'medium')
 
 browser_config:
   viewport: {"width": 1280, "height": 720}
