@@ -685,8 +685,12 @@ class LLMPrompt:
   Analyze the provided visual comparison:
   - **Before-Action Screenshot** (first image): Page state BEFORE the action was executed
   - **After-Action Screenshot** (second image): Page state AFTER the action completed
-  - **After-Action Page Structure**: Full text content and DOM elements from the final state
-  - **Page Info**: Current URL and title (after-action)
+  - **After-Action Page Structure**: Page text content extracted from visible elements (JSON array format), captured at the same time as the after-action screenshot. Note: Contains only text strings, not DOM structure or element attributes.
+  - **Page Info**: URL and title captured at the same time as the after-action screenshot
+
+  **IMPORTANT - Data Time Consistency**:
+  All provided data (screenshots, page structure, URL) were captured at the action execution time for consistency.
+  If the page has changed since then (navigation, popups, content updates), trust the provided data as the ground truth for verification.
 
   **Comparison Focus**:
   - Identify what changed between the two screenshots

@@ -203,8 +203,8 @@ class UITester:
             # Re-fetch page after execution
             # This ensures DOM diff is computed on the correct page
             self.page = self.driver.get_page()
-            dp_after = DeepCrawler(self.page)
-            curr = await dp_after.crawl(highlight=True, viewport_only=False, cache_dom=True)
+            dp.page = self.page
+            curr = await dp.crawl(highlight=True, viewport_only=False, cache_dom=True)
             diff_elems = curr.diff_dict([str(ElementKey.TAG_NAME), str(ElementKey.INNER_TEXT), str(ElementKey.ATTRIBUTES), str(ElementKey.CENTER_X), str(ElementKey.CENTER_Y)])
             if diff_elems:
                 logging.debug(f"Diff element map after action: {diff_elems}")
@@ -491,14 +491,24 @@ class UITester:
                 # Prepare images list for LLM (chronological order: before, then after)
                 images_for_llm = [before_screenshot, after_screenshot]
 
-                # Get page info
-                page_url, page_title = await self.driver.get_url()
-                logging.debug(f"verification page url: {page_url}, title: {page_title}")
+                # Use saved context from action execution time (time-consistent verification)
+                result = execution_context["last_action"].get("result", {})
+                saved_url = result.get("after_action_url")
+                saved_title = result.get("after_action_title")
+                saved_page_structure = result.get("after_action_page_structure")
 
-                # Crawl current page for text structure
-                dp = DeepCrawler(self.page)
-                await dp.crawl(highlight=False, filter_text=True, viewport_only=False)
-                page_structure = dp.get_text()
+                # Fallback to current page if saved context not available (backward compatibility)
+                if saved_url and saved_page_structure:
+                    page_url = saved_url
+                    page_title = saved_title
+                    page_structure = saved_page_structure
+                    logging.debug(f"Using saved action-time context: {page_url}")
+                else:
+                    page_url, page_title = await self.driver.get_url()
+                    dp = DeepCrawler(self.page)
+                    await dp.crawl(highlight=False, filter_text=True, viewport_only=False)
+                    page_structure = dp.get_text()
+                    logging.warning("Saved action context not available, using current page state (may cause time mismatch)")
 
                 # Prepare LLM input with comparison instructions
                 page_info = f"url: {page_url}, title: {page_title}"
@@ -873,9 +883,17 @@ class UITester:
                         file_name="plan_final_screenshot_failed",
                         context="verify"
                     )
-                    # Add plan-level screenshots to failure result
+                    # Capture page context at failure time (for time-consistent verification)
+                    try:
+                        after_action_url, after_action_title = await self.driver.get_url()
+                    except Exception:
+                        after_action_url, after_action_title = "", ""
+                    # Add plan-level screenshots and context to failure result
                     action_result["before_screenshot"] = initial_screenshot
                     action_result["after_screenshot"] = final_screenshot
+                    action_result["after_action_url"] = after_action_url
+                    action_result["after_action_title"] = after_action_title
+                    action_result["after_action_page_structure"] = ""  # 失败场景可为空
                     return execute_results, action_result
 
             except Exception as e:
@@ -891,12 +909,21 @@ class UITester:
                 except:
                     final_screenshot = None
 
+                # Capture page context at exception time (for time-consistent verification)
+                try:
+                    after_action_url, after_action_title = await self.driver.get_url()
+                except Exception:
+                    after_action_url, after_action_title = "", ""
+
                 failure_result = {
                     "success": False,
                     "message": f"Exception occurred: {str(e)}",
                     "screenshot": None,
                     "before_screenshot": initial_screenshot,
-                    "after_screenshot": final_screenshot
+                    "after_screenshot": final_screenshot,
+                    "after_action_url": after_action_url,
+                    "after_action_title": after_action_title,
+                    "after_action_page_structure": ""  # 异常场景可为空
                 }
                 return execute_results, failure_result
 
@@ -908,6 +935,17 @@ class UITester:
             context="verify"
         )
 
+        # Capture page context at action completion time (for time-consistent verification)
+        try:
+            after_action_url, after_action_title = await self.driver.get_url()
+            dp_after = DeepCrawler(self.page)
+            await dp_after.crawl(highlight=False, filter_text=True, viewport_only=False)
+            after_action_page_structure = dp_after.get_text()[:5000]  # 限制长度避免内存开销
+        except Exception as e:
+            logging.warning(f"Failed to capture action-time context: {str(e)}")
+            after_action_url, after_action_title = "", ""
+            after_action_page_structure = ""
+
         post_action_ss = await self._actions.b64_page_screenshot(
             file_name="final_success",
             context="test"
@@ -918,6 +956,9 @@ class UITester:
             "screenshot": post_action_ss,
             "before_screenshot": initial_screenshot,
             "after_screenshot": final_screenshot,
+            "after_action_url": after_action_url,
+            "after_action_title": after_action_title,
+            "after_action_page_structure": after_action_page_structure,
         }
 
     def get_monitoring_results(self) -> Dict[str, Any]:

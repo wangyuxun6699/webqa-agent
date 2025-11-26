@@ -508,6 +508,7 @@ async def execute_single_case(state: MainGraphState) -> dict:
     ui_tester_instance.current_success_criteria = case.get("success_criteria", [])
     # Clear old execution history to avoid cross-case pollution
     ui_tester_instance.execution_history.clear()
+    ui_tester_instance.last_action_context = None
 
     language = state.get('language', 'zh-CN')
     logging.debug(f"Execute case language: {language}")

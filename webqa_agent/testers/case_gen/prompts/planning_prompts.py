@@ -1369,8 +1369,34 @@ Skip generation when new elements are:
 ### For State-Dependent Elements
 - Check prerequisites, maintain required conditions, follow dependencies
 
-### For Persistent Elements  
+### For Persistent Elements
 - Test in any order, focus on functionality over state management
+
+## CRITICAL: Verify Step Constraints
+
+**IMPORTANT**: When generating verify steps, understand these execution constraints:
+
+1. **Text-Only Verification**: The verification system only has access to **visible text content** from the page, NOT DOM structure.
+   - ✅ DO: "Verify that a button labeled 'Submit' is displayed"
+   - ❌ DON'T: "Verify that a button with class 'btn-primary' and id 'submit-btn' exists"
+
+2. **No DOM Attribute Access**: During verify execution, class names, element IDs, HTML attributes, and tag names are NOT available.
+   - ✅ DO: "Verify the search results show product names and prices"
+   - ❌ DON'T: "Verify div elements with class 'product-card' contain price spans"
+
+3. **Visual and Text-Based Assertions**: Base your verify statements on:
+   - Visible text content
+   - Visual appearance (from screenshot)
+   - Presence/absence of text labels
+   - Text changes between before/after states
+
+4. **Element Attributes for Action Context Only**: The class/id/href attributes provided in the new elements list are for **understanding element purpose during action planning**, NOT for verify assertions.
+
+5. **State Change Verification**: Verify state changes through observable visual/text effects:
+   - Visibility: "Verify the modal dialog is now visible on screen"
+   - Enabled state: "Verify the submit button appears clickable (not grayed out)"
+   - Selection state: "Verify the checkbox shows a checkmark"
+   - Content change: "Verify the counter value changed from X to Y"
 
 ## Element Priority with State Context
 

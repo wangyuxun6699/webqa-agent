@@ -292,7 +292,7 @@ class LLMAPI:
                 content = str(response)
                 
             # logging.debug(f"Responses API response received, length: {len(content) if content else 0}")
-            # content = self._clean_response(content)
+            content = self._clean_response(content)
             return content
             
         except Exception as e:
