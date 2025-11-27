@@ -138,8 +138,21 @@ class ActionHandler:
         self.page = page
         if cookies:
             try:
-                cookies = json.loads(cookies)
-                await self.page.context.add_cookies(cookies)
+                # Unified format handling: support JSON string, dict, list
+                cookie_list: list
+                if isinstance(cookies, str):
+                    cookie_list = json.loads(cookies)      # JSON string → list
+                elif isinstance(cookies, dict):
+                    cookie_list = [cookies]                 # dict → list
+                elif isinstance(cookies, (list, tuple)):
+                    cookie_list = list(cookies)             # list/tuple → list
+                else:
+                    raise TypeError(f"Unsupported cookies type: {type(cookies)}")
+
+                if not isinstance(cookie_list, list):
+                    raise ValueError("Parsed cookies is not a list")
+
+                await self.page.context.add_cookies(cookie_list)
             except Exception as e:
                 raise Exception(f'add context cookies error: {e}')
 

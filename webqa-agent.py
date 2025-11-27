@@ -368,7 +368,10 @@ async def run_tests(cfg):
         sys.exit(1)
 
     # Build test_configurations
-    cookies = []
+    # Read cookies from browser_config
+    cookies = cfg.get("browser_config", {}).get("cookies", [])
+    if cookies:
+        print(f"[INFO] Loaded {len(cookies)} cookies from config")
     test_configurations = build_test_configurations(cfg, cookies=cookies)
 
     target_url = cfg.get("target", {}).get("url", "")
