@@ -279,102 +279,205 @@ class ActionHandler:
         """Set the page element buffer for action execution."""
         self.page_element_buffer = element_buffer
 
-    async def scroll(self, direction: str = 'down', scrollType: str = 'once', distance: Optional[int] = None) -> bool:
-        """Scroll page.
+    async def scroll(self, element_id: str, max_retries: int = 3, base_wait_time: float = 0.5) -> bool:
+        """Scroll to a specific element, making it visible in the viewport.
+        
+        This method scrolls the page to bring the target element into view.
+        It uses Playwright's scroll_into_view_if_needed with fallback strategies.
+        
+        For custom scroll behavior (horizontal scrolling, precise distance control),
+        use the Mouse wheel action instead.
+        
         Args:
-            direction: 'up' or 'down'
-            scrollType: 'once' or 'untilBottom' or 'untilTop'
-            distance: None or Number
+            element_id: The ID of the element to scroll to
+            max_retries: Maximum retry attempts for lazy-loaded content (default: 3)
+            base_wait_time: Base wait time in seconds, will be adaptive (default: 0.5)
 
         Returns:
-            bool: Whether scroll operation was performed
+            bool: Whether scroll to element was successful
         """
-        logging.debug('Start scrolling page')
+        logging.debug(f'Start scrolling to element {element_id}')
         
         # Get current active page
         page = self._get_current_page()
 
-        # Validate inputs to avoid silent no-ops
-        allowed_directions = {'up', 'down'}
-        allowed_scroll_types = {'once', 'untilBottom', 'untilTop'}
+        # Initialize action context for error propagation
+        ctx = ActionContext()
+        action_context_var.set(ctx)
+        ctx.max_scroll_attempts = max_retries
+        ctx.element_info = {"element_id": element_id, "action": "scroll"}
 
-        if direction not in allowed_directions:
-            logging.error(f"Invalid direction '{direction}'. Allowed: {sorted(list(allowed_directions))}")
+        # Get element from buffer
+        element = self.page_element_buffer.get(str(element_id))
+        if not element:
+            logging.warning(f'Element {element_id} not found in buffer for scroll')
+            ctx.set_error(
+                ERROR_ELEMENT_NOT_FOUND,
+                f"Element {element_id} not found in page element buffer",
+                element_id=element_id
+            )
             return False
 
-        if scrollType not in allowed_scroll_types:
-            logging.error(f"Invalid scrollType '{scrollType}'. Allowed: {sorted(list(allowed_scroll_types))}")
-            return False
+        # Check if element is already in viewport
+        is_in_viewport = element.get('isInViewport', True)
+        if is_in_viewport:
+            logging.debug(f'Element {element_id} already in viewport, no scroll needed')
+            return True
 
-        if distance is not None:
+        logging.info(f'Element {element_id} is outside viewport, scrolling to make it visible')
+
+        # Get element selectors
+        selector = element.get('selector')
+        xpath = element.get('xpath')
+
+        # Retry loop for handling lazy-loaded content
+        for attempt in range(max_retries):
             try:
-                distance = int(distance)
-            except (TypeError, ValueError):
-                logging.error(f"Invalid distance '{distance}'. Must be an integer or None")
-                return False
-            if distance < 0:
-                logging.error(f"Invalid distance '{distance}'. Must be >= 0")
-                return False
+                ctx.scroll_attempts = attempt + 1
+                # Adaptive wait time increases with retries for slow-loading content
+                current_wait_time = base_wait_time * (1 + attempt * 0.5)
 
-        async def perform_scroll():  # Execute scroll operation
-            if direction == 'up':
-                await page.evaluate(f'(document.scrollingElement || document.body).scrollTop -= {distance};')
-            elif direction == 'down':
-                await page.evaluate(f'(document.scrollingElement || document.body).scrollTop += {distance};')
+                # Strategy 1: Use Playwright's scroll_into_view_if_needed (most reliable)
+                if self._is_valid_css_selector(selector):
+                    try:
+                        ctx.attempted_strategies.append(f"css_selector_attempt_{attempt + 1}")
+                        await page.locator(selector).scroll_into_view_if_needed(timeout=5000)
+                        logging.debug(f'Scrolled to element {element_id} using CSS selector (attempt {attempt + 1})')
 
-        if not distance:
-            distance = int(await page.evaluate('window.innerHeight') / 2)
-            logging.debug(f'Scrolling distance: {distance}')
+                        # Wait for scroll animation + potential lazy-loading
+                        await asyncio.sleep(current_wait_time)
 
-        if scrollType == 'once':
-            await perform_scroll()
-            return True
+                        # Verify page stability after scroll (for dynamic content)
+                        await self._wait_for_page_stability()
 
-        elif scrollType == 'untilBottom':
-            prev_scroll = -1  # Record last scroll position, avoid stuck
+                        # Verify element is actually in viewport using bounding_box
+                        try:
+                            rect = await page.locator(selector).bounding_box()
+                            if rect:
+                                viewport_height = await page.evaluate('window.innerHeight')
+                                viewport_width = await page.evaluate('window.innerWidth')
+                                is_visible = (rect['y'] >= 0 and rect['y'] < viewport_height and
+                                              rect['x'] >= 0 and rect['x'] < viewport_width)
+                                if is_visible:
+                                    logging.debug(f'Element {element_id} verified in viewport at ({rect["x"]:.1f}, {rect["y"]:.1f})')
+                                else:
+                                    logging.warning(f'Element {element_id} scrolled but still outside viewport: y={rect["y"]:.1f}, viewport_height={viewport_height}')
+                        except Exception as verify_error:
+                            logging.debug(f'Could not verify viewport position for element {element_id}: {verify_error}')
 
-            while True:
-                # Get current scroll position and page total height
-                current_scroll = await page.evaluate('window.scrollY')
-                current_scroll_height = await page.evaluate('document.body.scrollHeight')
+                        return True
+                    except Exception as css_error:
+                        ctx.playwright_error = str(css_error)
+                        if attempt < max_retries - 1:
+                            logging.debug(f'CSS selector scroll failed on attempt {attempt + 1}: {css_error}, retrying...')
+                            await asyncio.sleep(current_wait_time)
+                            continue
+                        else:
+                            logging.debug(f'CSS selector scroll failed after {max_retries} attempts: {css_error}, trying XPath')
 
-                # Check if page is scrolled to the bottom
-                if current_scroll == prev_scroll:
-                    logging.debug('No further scroll possible, reached the bottom.')
-                    break
+                # Strategy 2: Try XPath if CSS fails
+                if xpath:
+                    try:
+                        ctx.attempted_strategies.append(f"xpath_attempt_{attempt + 1}")
+                        await page.locator(f'xpath={xpath}').scroll_into_view_if_needed(timeout=5000)
+                        logging.debug(f'Scrolled to element {element_id} using XPath (attempt {attempt + 1})')
 
-                # Until bottom
-                if current_scroll + distance >= current_scroll_height:
-                    distance = current_scroll_height - current_scroll
-                    logging.debug(f'Adjusting last scroll distance to {distance}')
+                        # Wait for scroll animation + potential lazy-loading
+                        await asyncio.sleep(current_wait_time)
 
-                prev_scroll = current_scroll
-                await perform_scroll()
-                await asyncio.sleep(1)
+                        # Verify page stability after scroll
+                        await self._wait_for_page_stability()
 
-            return True
+                        # Verify element is actually in viewport using bounding_box
+                        try:
+                            rect = await page.locator(f'xpath={xpath}').bounding_box()
+                            if rect:
+                                viewport_height = await page.evaluate('window.innerHeight')
+                                viewport_width = await page.evaluate('window.innerWidth')
+                                is_visible = (rect['y'] >= 0 and rect['y'] < viewport_height and
+                                              rect['x'] >= 0 and rect['x'] < viewport_width)
+                                if is_visible:
+                                    logging.debug(f'Element {element_id} verified in viewport at ({rect["x"]:.1f}, {rect["y"]:.1f})')
+                                else:
+                                    logging.warning(f'Element {element_id} scrolled but still outside viewport: y={rect["y"]:.1f}, viewport_height={viewport_height}')
+                        except Exception as verify_error:
+                            logging.debug(f'Could not verify viewport position for element {element_id}: {verify_error}')
 
-        elif scrollType == 'untilTop':
-            prev_scroll = -1
+                        return True
+                    except Exception as xpath_error:
+                        ctx.playwright_error = str(xpath_error)
+                        if attempt < max_retries - 1:
+                            logging.debug(f'XPath scroll failed on attempt {attempt + 1}: {xpath_error}, retrying...')
+                            await asyncio.sleep(current_wait_time)
+                            continue
+                        else:
+                            logging.debug(f'XPath scroll failed after {max_retries} attempts: {xpath_error}, trying coordinate-based scroll')
 
-            while True:
-                current_scroll = await page.evaluate('window.scrollY')
+                # Strategy 3: Fallback to coordinate-based scrolling
+                center_y = element.get('center_y')
+                if center_y is not None:
+                    ctx.attempted_strategies.append(f"coordinates_attempt_{attempt + 1}")
+                    viewport_height = await page.evaluate('window.innerHeight')
 
-                # If already at top or no progress, stop
-                if current_scroll <= 0 or current_scroll == prev_scroll:
-                    logging.debug('No further scroll possible, reached the top.')
-                    break
+                    # Calculate target scroll position (center element in viewport)
+                    target_scroll_y = center_y - viewport_height / 2
+                    target_scroll_y = max(0, target_scroll_y)  # Don't scroll above page top
 
-                # Adjust last scroll to not go past top
-                if current_scroll - distance <= 0:
-                    distance = current_scroll
-                    logging.debug(f'Adjusting last scroll distance to {distance}')
+                    # Log scroll operation for debugging
+                    current_scroll_y = await page.evaluate('window.scrollY')
+                    logging.debug(f'Scrolling element {element_id}: current scroll position={current_scroll_y}, target scroll position={target_scroll_y}')
 
-                prev_scroll = current_scroll
-                await perform_scroll()
-                await asyncio.sleep(1)
+                    # Perform scroll with smooth behavior
+                    await page.evaluate(f'window.scrollTo({{top: {target_scroll_y}, behavior: "smooth"}})')
+                    logging.debug(f'Scrolled to element {element_id} using coordinates (y={target_scroll_y}, attempt {attempt + 1})')
 
-            return True
+                    # Adaptive wait time for smooth scroll + lazy loading
+                    await asyncio.sleep(current_wait_time + 0.3)
+
+                    # Verify page stability after scroll
+                    page_stable = await self._wait_for_page_stability()
+                    if not page_stable and attempt == max_retries - 1:
+                        ctx.set_error(
+                            ERROR_SCROLL_TIMEOUT,
+                            f"Element {element_id} scroll succeeded but page content unstable after {max_retries} attempts",
+                            selector=selector,
+                            xpath=xpath,
+                            center_y=center_y
+                        )
+
+                    return True
+
+                # If all strategies failed but we have more retries, wait and continue
+                if attempt < max_retries - 1:
+                    logging.debug(f'All scroll strategies failed on attempt {attempt + 1}, waiting before retry...')
+                    await asyncio.sleep(current_wait_time * 2)
+                    continue
+
+            except Exception as e:
+                ctx.playwright_error = str(e)
+                if attempt < max_retries - 1:
+                    logging.warning(f'Error scrolling to element {element_id} on attempt {attempt + 1}: {e}, retrying...')
+                    await asyncio.sleep(current_wait_time)
+                    continue
+                else:
+                    logging.error(f'Error scrolling to element {element_id} after {max_retries} attempts: {e}')
+                    ctx.set_error(
+                        ERROR_SCROLL_FAILED,
+                        f"All scroll strategies failed after {max_retries} attempts with exception: {str(e)}",
+                        selector=selector,
+                        xpath=xpath
+                    )
+                    return False
+
+        # Final failure: all retries exhausted
+        logging.warning(f'Could not scroll to element {element_id} after {max_retries} attempts: no valid selectors or all strategies failed')
+        ctx.set_error(
+            ERROR_SCROLL_FAILED,
+            f"Could not scroll to element {element_id}: no valid selectors or all strategies failed",
+            selector=selector,
+            xpath=xpath
+        )
+        return False
 
     async def ensure_element_in_viewport(self, element_id: str, max_retries: int = 3, base_wait_time: float = 0.5) -> bool:
         """Ensure element is in viewport by scrolling if needed with enhanced edge case handling.

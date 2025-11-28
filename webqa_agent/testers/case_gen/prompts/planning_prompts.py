@@ -303,6 +303,15 @@ If any check fails, revise the description using the composition formula above.
 - **Healthcare**: Use realistic patient data, medical codes, and HIPAA-compliant test scenarios
 - **Social Media**: Use realistic user profiles, content types, and interaction patterns
 
+### Scroll vs Mouse Wheel - Usage Guidelines
+**CRITICAL**: Understand the difference between `Scroll` and `Mouse` wheel actions.
+
+#### Scroll Action (Element-based Navigation)
+- **Purpose**: Scroll the page to bring a specific element into view
+- **When to Use**: Navigate to elements outside the current viewport
+- **Format**: `{{"action": "Scroll to the footer target element"}}`
+- **Behavior**: The system automatically scrolls to center the target element in viewport
+
 ### Mouse Action Usage Guidelines
 **IMPORTANT**: The Mouse action allows precise cursor positioning and mouse wheel scrolling.
 
@@ -312,8 +321,10 @@ If any check fails, revise the description using the composition formula above.
   - Use for: Precise cursor positioning, custom drawing areas, coordinate-based interactions
 
 - **Mouse Wheel**: Use format `"Mouse"` action with value `"wheel:deltaX,deltaY"`
-  - Example: `{{"action": "Scroll mouse wheel down"}}` with value `"wheel:0,100"`
-  - Use for: Custom scroll behavior, horizontal scrolling, precise scroll control
+  - Example: `{{"action": "Scroll mouse wheel down 300 pixels"}}` with value `"wheel:0,300"`
+  - Use for: **Precise scroll distance control, horizontal scrolling, custom scroll behavior**
+  - **deltaX**: Horizontal scroll amount (positive = right, negative = left)
+  - **deltaY**: Vertical scroll amount (positive = down, negative = up)
 
 #### When to Use Mouse Action
 - **Coordinate-based interactions**: Canvas drawing, image mapping, coordinate systems
@@ -325,8 +336,10 @@ If any check fails, revise the description using the composition formula above.
 [
   {{"action": "Move mouse to drawing area coordinates (150, 300)"}},
   {{"verify": "Verify cursor position indicator updates"}},
-  {{"action": "Scroll horizontally in the canvas"}},
-  {{"verify": "Verify canvas content shifts horizontally"}}
+  {{"action": "Scroll horizontally 200 pixels to the right in the carousel"}},
+  {{"verify": "Verify next set of items is displayed"}},
+  {{"action": "Scroll down 500 pixels using mouse wheel"}},
+  {{"verify": "Verify more content is revealed"}}
 ]
 ```
 

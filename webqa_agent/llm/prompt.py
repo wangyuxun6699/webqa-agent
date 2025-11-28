@@ -176,9 +176,11 @@ class LLMPrompt:
     **NEVER** interact (Tap/Hover) with anchor elements directly.
 
     ## Scroll Behavior Constraints
-    - Avoid planning `Scroll` if the page is already at the bottom.
-    - Check prior actions (`WhatHaveBeenDone`) for any `Scroll untilBottom`. If present, treat the page as already scrolled.
-    - If still unable to locate a required element, return:
+    - Use `Scroll` to navigate to a specific element that is outside the current viewport.
+    - `Scroll` requires a target element ID - it scrolls the page to bring that element into view.
+    - Check if the target element is already visible in the screenshot before planning a `Scroll`.
+    - If you need custom scroll behavior (horizontal scrolling, precise distance), use `Mouse` with wheel operation.
+    - If still unable to locate a required element after scrolling, return:
       `"Validation Failed"` instead of re-scrolling.
 
     ## Spatial Direction Definitions
@@ -223,17 +225,12 @@ class LLMPrompt:
         - type: 'Upload', upload a file (or click the upload button)
         * {{ locate: {{ id: string }}, param: null }}
         * use this action when the instruction is a "upload" statement. locate the input element to upload the file.
-        - type: 'Scroll', scroll up or down.
-        * {{
-            locate: {{ id: string }} | null,
-            param: {{
-                direction: 'down'(default) | 'up',
-                scrollType: 'once' (default) | 'untilBottom' | 'untilTop',
-                distance: null | number
-            }}
-            }}
-            * To scroll some specific element, put the element at the center of the region in the `locate` field. If it's a page scroll, put `null` in the `locate` field.
-            * `param` is required in this action. If some fields are not specified, use direction `down`, `once` scroll type, and `null` distance.
+        - type: 'Scroll', scroll to a specific element to make it visible in viewport.
+        * {{ locate: {{ id: string }}, param: null }}
+        * `locate.id` is **REQUIRED** - specify the element ID you want to scroll to.
+        * The page will automatically scroll to bring the target element into view.
+        * Use this when you need to navigate to a specific element that is outside the current viewport.
+        * **NOTE**: For custom scroll behavior (horizontal scrolling, precise distance control), use the Mouse action with wheel operation instead.
         - type: 'GoToPage', navigate directly to a specific URL
         * {{ param: {{ url: string }} }}
         * use this action when you need to navigate to a specific web page URL, useful for returning to homepage or navigating to known pages.
@@ -301,7 +298,7 @@ class LLMPrompt:
     ### Supported Actions:
     - Tap: Click on a specified page element (such as a button or link). Typically used to trigger a click event.
     - Hover: Move the mouse over a specified page element (such as a button or link). Typically used to show tooltip or hover effect.
-    - Scroll: Scroll the page or a specific region. You can specify the direction (down, up), the scroll distance, or scroll to the edge of the page/region.
+    - Scroll: Scroll to a specific element to make it visible in viewport. Requires the target element's ID in locate. Use this when you need to navigate to an element outside the current viewport.
     - Input: Enter text into an input field or textarea. This action will replace the current value with the specified final value.
     - Clear: Clear the content of an input field. Requires the input's external id in locate.
     - Sleep: Wait for a specified amount of time (in milliseconds). Useful for waiting for page loads or asynchronous content to render.
@@ -311,7 +308,7 @@ class LLMPrompt:
     - SelectDropdown: Select an option from a dropdown menu. If the specific option element is visible and has an ID in the page description, directly select that option. Otherwise, click the dropdown container to expand it, then select the desired option by text.
     - GoToPage: Navigate directly to a specific URL. Useful for returning to the homepage, navigating to known pages, or entering a new web address. Requires a URL parameter.
     - GoBack: Navigate back to the previous page in the browser history, similar to clicking the browser's back button. Does not require any parameters.
-    - Mouse: Unified mouse action for move and wheel.
+    - Mouse: Unified mouse action for move and wheel. Use wheel operation for precise scroll distance control or horizontal scrolling (deltaX, deltaY). Use move operation for coordinate-based cursor positioning.
 
     Please ensure the output is a valid **JSON** object. Do **not** include any markdown, backticks, or code block indicators.
 
@@ -364,21 +361,38 @@ class LLMPrompt:
         }
         ```
 
-        #### Example 2: Scroll (scroll history aware)
+        #### Example 2: Scroll to element
+        "Scroll to view the footer section"
         ```json
         {
           "actions": [
             {
               "type": "Scroll",
-              "thought": "Scroll to bottom to reveal more datasets",
-              "param": { "direction": "down", "scrollType": "untilBottom", "distance": null },
-              "locate": null
+              "thought": "The footer element (id: 15) is outside viewport, scroll to make it visible",
+              "param": null,
+              "locate": { "id": "15" }
             }
           ]
         }
         ```
 
-        #### Example 3: 上传文件'example.pdf',等待10s
+        #### Example 3: Mouse wheel for custom scroll
+        "Scroll down 300 pixels" or "Scroll horizontally"
+        ```json
+        {
+          "actions": [
+            {
+              "type": "Mouse",
+              "thought": "Use mouse wheel to scroll down 300 pixels for precise control",
+              "param": { "op": "wheel", "deltaX": 0, "deltaY": 300 },
+              "locate": null
+            }
+          ]
+        }
+        ```
+        Note: Use `Scroll` for element-based navigation, use `Mouse` wheel for precise distance/horizontal scrolling.
+
+        #### Example 4: 上传文件'example.pdf',等待10s
         "Upload a file and then wait"
         ```json
         {

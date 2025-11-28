@@ -160,7 +160,7 @@ class UITool(BaseTool):
         elif action == "SelectDropdown":
             action_phrase = f"From the {target}, select the option '{value}'"
         elif action == "Scroll":
-            action_phrase = f"Scroll {value or 'down'} on the page"
+            action_phrase = f"Scroll to {target or 'the element'}"
         elif action == "Clear":
             action_phrase = f"Clear the content of {target}"
         elif action == "Hover":
