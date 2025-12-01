@@ -103,8 +103,6 @@ Each test case must include these standardized components with enhanced business
 [
   {{"action": "Click the 'About Us' link in the footer"}},
   {{"verify": "Verify the About Us page content is displayed"}},
-  {{"action": "GoBack"}},
-  {{"verify": "Verify returned to the homepage"}}
 ]
 ```
 
