@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
+from webqa_agent.actions.action_types import ActionType, is_page_agnostic_action, get_page_agnostic_keywords
 from webqa_agent.crawler.deep_crawler import DeepCrawler
 from webqa_agent.testers.case_gen.prompts.agent_prompts import get_execute_system_prompt
 from webqa_agent.testers.case_gen.prompts.planning_prompts import get_dynamic_step_generation_prompt
@@ -651,8 +652,7 @@ async def agent_worker_node(state: dict, config: dict) -> dict:
     logging.debug(f"LLM configured: {llm_config.get('model')} at {llm_config.get('base_url')}")
 
     # Instantiate tools with correct parameters
-    # Note: All tools now use ui_tester_instance to dynamically get page,
-    # which ensures correct page reference after get_new_page operations
+    # Note: All tools now use ui_tester_instance to dynamically get page
     tools = [
         UITool(ui_tester_instance=ui_tester_instance),
         UIAssertTool(ui_tester_instance=ui_tester_instance),
@@ -1256,6 +1256,54 @@ async def agent_worker_node(state: dict, config: dict) -> dict:
         logging.debug("All test steps completed, generating final summary")
         logging.debug(f"Failed steps detected during execution: {failed_steps}")
 
+        # Helper function to sanitize messages for summary generation
+        def _sanitize_message_for_summary(msg, max_length: int = 250) -> str:
+            """Clean message content to avoid Azure OpenAI content filter triggers.
+
+            Removes:
+            - Base64 image URLs (main trigger)
+            - HTML tags (XSS detection)
+            - Error keywords that trigger safety filters
+            - DOM dumps
+            """
+            import re
+
+            # Extract content
+            if hasattr(msg, 'content'):
+                content = str(msg.content)
+            else:
+                content = str(msg)
+
+            # Remove base64 image URLs (primary trigger for content filter)
+            content = re.sub(
+                r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+',
+                '[IMAGE_REMOVED]',
+                content
+            )
+
+            # Remove HTML tags (can trigger XSS detection)
+            content = re.sub(r'<[^>]+>', '', content)
+
+            # Remove error keywords that may trigger content filter
+            content = re.sub(
+                r'\b(denied|blocked|failed|error|forbidden|hack|exploit|inject)\b',
+                '[X]',
+                content,
+                flags=re.IGNORECASE
+            )
+
+            # Remove DOM dumps (can be large and trigger filters)
+            if 'pageDescription' in content or 'dom_tree' in content:
+                content = re.sub(
+                    r'pageDescription.*?(?===|$)',
+                    '[DOM_SUMMARY]',
+                    content,
+                    flags=re.DOTALL
+                )
+
+            # Truncate to max length
+            return content[:max_length]
+
         # Use the LLM directly to generate the summary (not through the agent)
         try:
             # Prepare context for summary generation
@@ -1275,30 +1323,74 @@ FINAL_SUMMARY: Test case "{case_name}" completed successfully. All {total_steps}
 If there were failures:
 FINAL_SUMMARY: Test case "{case_name}" failed at step [X]. Error: [description]. Recovery attempts: [if any]. Recommendation: [suggested fix]."""
 
-            # Get the last few messages for context (excluding images to save tokens)
+            # Get and sanitize recent messages (reduced from 6 to 4 to minimize content filter risk)
             recent_messages = []
-            for msg in messages[-6:]:  # Last 3 exchanges
+            for msg in messages[-4:]:  # Last 2 exchanges (reduced from 6/3)
+                sanitized = _sanitize_message_for_summary(msg, max_length=250)
+
                 if isinstance(msg, HumanMessage):
-                    if isinstance(msg.content, list):
-                        # Extract text content only
-                        text_content = next((item["text"] for item in msg.content if item["type"] == "text"), str(msg.content))
-                        recent_messages.append(f"Human: {text_content}")
-                    else:
-                        recent_messages.append(f"Human: {msg.content}")
+                    recent_messages.append(f"User: {sanitized}")
                 elif isinstance(msg, AIMessage):
-                    recent_messages.append(f"AI: {msg.content[:500]}...")  # Truncate for brevity
+                    recent_messages.append(f"Agent: {sanitized}")
 
             context = "\n".join(recent_messages)
+            logging.debug(f"Sanitized context for summary generation ({len(context)} chars)")
+
             full_prompt = f"{summary_prompt}\n\nRecent test execution context:\n{context}"
 
-            # Use the LLM directly
-            response = await llm.ainvoke(full_prompt)
+            # Retry logic to handle content filter errors
+            agent_output = None
+            max_retries = 2
 
-            # Extract content from response
-            if hasattr(response, 'content'):
-                agent_output = response.content
-            else:
-                agent_output = str(response)
+            for attempt in range(max_retries):
+                try:
+                    logging.debug(f"Attempting summary generation (attempt {attempt + 1}/{max_retries})")
+                    response = await llm.ainvoke(full_prompt)
+
+                    # Successfully got response
+                    if hasattr(response, 'content'):
+                        agent_output = response.content
+                    else:
+                        agent_output = str(response)
+
+                    logging.debug("Summary generation successful")
+                    break
+
+                except Exception as llm_error:
+                    error_msg = str(llm_error)
+
+                    # Check if this is a content filter error
+                    is_content_filter = "content" in error_msg.lower() and ("filter" in error_msg.lower() or "policy" in error_msg.lower())
+
+                    if is_content_filter:
+                        logging.warning(
+                            f"Azure content filter triggered during summary generation (attempt {attempt + 1}): {error_msg[:200]}"
+                        )
+
+                        if attempt < max_retries - 1:
+                            # Retry with minimal context (no message history)
+                            logging.info("Retrying with minimal context (no message history)")
+                            full_prompt = f"""{summary_prompt}
+
+Test case: {case_name}
+Total steps: {total_steps}
+Failed steps: {len(failed_steps) if failed_steps else 0}
+
+Generate a brief summary without referencing specific execution details."""
+                            await asyncio.sleep(0.5)  # Brief delay before retry
+                        else:
+                            # Max retries reached
+                            logging.error("Max retries reached for summary generation, using fallback")
+                            break
+                    else:
+                        # Non-content-filter error, don't retry
+                        logging.error(f"Non-content-filter error in summary generation: {error_msg}")
+                        break
+
+            # If LLM failed after retries, agent_output will be None and fallback will be used below
+            if not agent_output:
+                # Will use fallback in except block
+                raise Exception("LLM summary generation failed after retries")
 
             # Ensure the summary has the correct format
             if agent_output and not agent_output.strip().startswith("FINAL_SUMMARY:"):
@@ -1435,9 +1527,7 @@ def _is_operation_page_agnostic(step_type: str, instruction: str) -> bool:
     Determine if operation is page-type agnostic (can execute on unsupported page).
 
     Page-agnostic operations don't depend on DOM elements and can execute on PDF/plugin pages:
-    - Browser navigation: GoBack, GoForward, Sleep
-    - Screenshot: Screenshot (captures rendered pixels, doesn't need DOM)
-    - Tab switching: GetNewPage (switches browser context)
+    - Browser navigation: GoBack, GoForward, GoToPage, Sleep
     - UX verification: UX_Verify (already implements screenshot fallback)
 
     Args:
@@ -1456,14 +1546,17 @@ def _is_operation_page_agnostic(step_type: str, instruction: str) -> bool:
         True
     """
 
-    # Category A: Explicit page-agnostic operation keywords
-    PAGE_AGNOSTIC_KEYWORDS = [
-        'goback', 'go_back', 'go back', 'navigate back', 'back',
-        'goforward', 'go_forward', 'go forward', 'forward',
-        'sleep', 'wait',
-        'screenshot', 'capture',
-        'getnewpage', 'get_new_page', 'get new page', 'switch tab', 'switch window',
-    ]
+    # Priority 1: Direct action type detection (most reliable)
+    # Check if instruction contains action type names directly
+    for action_type in [ActionType.GO_BACK, ActionType.SLEEP]:
+        if action_type in instruction:
+            logging.debug(f"Page-agnostic action detected via action type: {action_type}")
+            return True
+
+    # Priority 2: Keyword matching (handles varied phrasings)
+    # Get centralized keywords from action_types module
+    # This eliminates code duplication and ensures consistency
+    PAGE_AGNOSTIC_KEYWORDS = get_page_agnostic_keywords()
 
     # Category C: Hybrid operations (available in degraded mode)
     DEGRADED_MODE_TYPES = ['UX_Verify']
@@ -1476,6 +1569,7 @@ def _is_operation_page_agnostic(step_type: str, instruction: str) -> bool:
     instruction_lower = instruction.lower().replace('_', ' ').replace('-', ' ')
     for keyword in PAGE_AGNOSTIC_KEYWORDS:
         if keyword in instruction_lower:
+            logging.debug(f"Page-agnostic operation detected via keyword: '{keyword}'")
             return True
 
     # Default: DOM-dependent operation (needs to abort)

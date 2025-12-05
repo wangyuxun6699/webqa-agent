@@ -17,7 +17,6 @@ class ActionExecutor:
             "Clear": self._execute_clear,
             "Scroll": self._execute_scroll,
             "KeyboardPress": self._execute_keyboard_press,
-            "GetNewPage": self._execute_get_new_page,
             "Upload": self._execute_upload,
             "SelectDropdown": self._execute_select_dropdown,
             "Drag": self._execute_drag,
@@ -69,8 +68,6 @@ class ActionExecutor:
             for key in keys:
                 value = value.get(key)
                 if value is None:
-                    if action["type"] == "Scroll" and key == "distance":
-                        continue
                     logging.error(f"Missing required parameter: {param}")
                     return False  # Return False to indicate validation failure
         return True  # Return True if all parameters are present
@@ -268,18 +265,38 @@ class ActionExecutor:
             return {"success": False, "message": f"Input action failed with an exception: {e}"}
 
     async def _execute_scroll(self, action):
-        """Execute scroll action."""
-        if not self._validate_params(action, ["param.direction", "param.scrollType", "param.distance"]):
-            return {"success": False, "message": "Missing parameters for scroll action"}
-        direction = action.get("param").get("direction", "down")
-        scroll_type = action.get("param").get("scrollType", "once")
-        distance = action.get("param").get("distance", None)
-
-        success = await self._actions.scroll(direction, scroll_type, distance)
+        """Execute scroll action - scroll to a specific element."""
+        if not self._validate_params(action, ["locate.id"]):
+            return {"success": False, "message": "Missing locate.id for scroll action. Scroll requires an element ID to scroll to."}
+        
+        element_id = action.get("locate", {}).get("id")
+        
+        success = await self._actions.scroll(element_id)
+        
+        # Read action context for detailed error information
+        ctx = action_context_var.get()
+        
         if success:
-            return {"success": True, "message": f"Scrolled {direction} successfully."}
+            return {"success": True, "message": f"Scrolled to element {element_id} successfully."}
         else:
-            return {"success": False, "message": "Scroll action failed."}
+            # Enrich error message with context
+            base_message = f"Scroll to element {element_id} failed."
+            error_details = {}
+            
+            if ctx and ctx.error_type:
+                error_details = {
+                    "error_type": ctx.error_type,
+                    "error_reason": ctx.error_reason,
+                    "attempted_strategies": ctx.attempted_strategies,
+                    "element_info": ctx.element_info,
+                    "playwright_error": ctx.playwright_error
+                }
+            
+            return {
+                "success": False,
+                "message": base_message,
+                "error_details": error_details
+            }
 
     async def _execute_keyboard_press(self, action):
         """Execute keyboard press action."""
@@ -319,13 +336,6 @@ class ActionExecutor:
                 "error_details": error_details
             }
 
-    async def _execute_get_new_page(self):
-        """Execute get new page action."""
-        success = await self._actions.get_new_page()
-        if success:
-            return {"success": True, "message": "Successfully switched to new page."}
-        else:
-            return {"success": False, "message": "Failed to get new page."}
 
     async def _execute_upload(self, action, file_path):
         """Execute upload action."""

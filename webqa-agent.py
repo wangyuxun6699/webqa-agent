@@ -154,6 +154,9 @@ def validate_and_build_llm_config(cfg):
     temperature = llm_cfg_raw.get("temperature", 0.1)
     top_p = llm_cfg_raw.get("top_p")
     max_tokens = llm_cfg_raw.get("max_tokens")  # Optional: maximum output tokens
+    # GPT-5 reasoning & text verbosity configuration (optional, nested format only)
+    reasoning = llm_cfg_raw.get("reasoning")  # e.g., {effort: low}
+    text_cfg = llm_cfg_raw.get("text")  # e.g., {verbosity: medium}
 
     # Validate required fields
     if not api_key:
@@ -179,6 +182,11 @@ def validate_and_build_llm_config(cfg):
         llm_config["top_p"] = top_p
     if max_tokens is not None:
         llm_config["max_tokens"] = max_tokens
+    # Pass through optional GPT-5 specific configuration (nested format only)
+    if reasoning is not None:
+        llm_config["reasoning"] = reasoning
+    if text_cfg is not None:
+        llm_config["text"] = text_cfg
 
     # Show configuration source (hide sensitive information)
     api_key_masked = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
@@ -360,7 +368,8 @@ async def run_tests(cfg):
         sys.exit(1)
 
     # Build test_configurations
-    cookies = []
+    # Read cookies from browser_config
+    cookies = cfg.get("browser_config", {}).get("cookies", [])
     test_configurations = build_test_configurations(cfg, cookies=cookies)
 
     target_url = cfg.get("target", {}).get("url", "")

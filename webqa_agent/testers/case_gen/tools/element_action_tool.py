@@ -12,6 +12,11 @@ from typing import Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from webqa_agent.actions.action_types import (
+    ActionType,
+    is_page_agnostic_action,
+    get_action_default_phrase,
+)
 from webqa_agent.crawler.deep_crawler import DeepCrawler
 from webqa_agent.testers.function_tester import UITester
 
@@ -34,7 +39,6 @@ class UIActionSchema(BaseModel):
             "'GoToPage' - Navigate to a URL; "
             "'GoBack' - Navigate back to the previous page; "
             "'Sleep' - Wait for a specified duration; "
-            "'GetNewPage' - Switch to a new tab or window; "
             "'Mouse' - Move mouse cursor or scroll mouse wheel."
         )
     )
@@ -59,8 +63,7 @@ class UIActionSchema(BaseModel):
             "'Upload' action (file path), "
             "'Sleep' action (duration in milliseconds), "
             "'Mouse' action (operation specification in format 'move:x,y' for cursor positioning to coordinates (x,y) or 'wheel:deltaX,deltaY' for scrolling by delta values. Examples: 'move:100,200' moves cursor to (100,200), 'wheel:0,100' scrolls down by 100 pixels). "
-            "Optional for 'Drag' action (target position description), "
-            "'GetNewPage' action (tab/window identifier). "
+            "Optional for 'Drag' action (target position description). "
             "Optional for other actions."
         )
     )
@@ -157,7 +160,7 @@ class UITool(BaseTool):
         elif action == "SelectDropdown":
             action_phrase = f"From the {target}, select the option '{value}'"
         elif action == "Scroll":
-            action_phrase = f"Scroll {value or 'down'} on the page"
+            action_phrase = f"Scroll to {target or 'the element'}"
         elif action == "Clear":
             action_phrase = f"Clear the content of {target}"
         elif action == "Hover":
@@ -176,10 +179,6 @@ class UITool(BaseTool):
             action_phrase = f"Navigate back to the previous page"
         elif action == "Sleep":
             action_phrase = f"Wait for {value or '1000'} milliseconds"
-        elif action == "GetNewPage":
-            action_phrase = f"Switch to new page/tab"
-            if value:
-                action_phrase += f" {value}"
         elif action == "Mouse":
             if value and 'move:' in value.lower():
                 # Extract coordinates from 'move:x,y' format
@@ -190,9 +189,16 @@ class UITool(BaseTool):
             else:
                 action_phrase = f"Perform mouse action on {target} with value '{value}'"
         else:
-            action_phrase = f"{action} on {target}"
-            if value:
-                action_phrase += f" with value '{value}'"
+            # Improved fallback logic to avoid malformed phrases like "action on "
+            if target:
+                action_phrase = f"{action} on {target}"
+                if value:
+                    action_phrase += f" with value '{value}'"
+            else:
+                # No target provided - just use action type
+                action_phrase = action
+                if value:
+                    action_phrase += f" with value '{value}'"
 
         if not description:
             instruction_parts.append(action_phrase)
@@ -418,6 +424,23 @@ class UIAssertionSchema(BaseModel):
         )
     )
 
+    focus_region: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional page region to focus verification on. "
+            "When specified, directs the LLM to pay primary attention to elements within this region. "
+            "Use semantic region descriptions that match visual layout. "
+            "Examples: "
+            "'header navigation bar', "
+            "'main content area', "
+            "'sidebar widgets', "
+            "'shopping cart summary', "
+            "'login form section', "
+            "'footer links'. "
+            "If not specified, verification considers the entire visible page."
+        )
+    )
+
 
 class UIAssertTool(BaseTool):
     """A tool to perform functional UI assertions via a UITester instance."""
@@ -434,13 +457,20 @@ class UIAssertTool(BaseTool):
     def _run(self, assertion: str) -> str:
         raise NotImplementedError("Use arun for asynchronous execution.")
 
-    async def _arun(self, assertion: str) -> str:
+    async def _arun(self, assertion: str, focus_region: Optional[str] = None) -> str:
         """Executes a UI assertion using the UITester and returns a formatted
-        verification result."""
+        verification result.
+
+        Args:
+            assertion: The assertion statement to verify
+            focus_region: Optional page region to focus verification on
+        """
         if not self.ui_tester_instance:
             return "[FAILURE] Error: UITester instance not provided for assertion."
 
         logging.debug(f"Executing UI assertion: {assertion}")
+        if focus_region:
+            logging.debug(f"Focus region specified: {focus_region}")
 
         try:
             # Build execution context from instance state (context-aware verification)
@@ -462,7 +492,11 @@ class UIAssertTool(BaseTool):
                 }
                 logging.debug("Passing execution context to verify()")
 
-            execution_steps, result = await self.ui_tester_instance.verify(assertion, execution_context)
+            execution_steps, result = await self.ui_tester_instance.verify(
+                assertion,
+                execution_context,
+                focus_region=focus_region
+            )
 
             if not isinstance(result, dict):
                 return f"[FAILURE] Assertion error: Invalid response format from UITester.verify(). Expected dict, got {type(result)}"

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from webqa_agent.actions.action_executor import ActionExecutor
 from webqa_agent.actions.action_handler import ActionHandler
+from webqa_agent.actions.action_types import is_page_agnostic_action, ActionType, get_page_agnostic_keywords
 from webqa_agent.browser.check import ConsoleCheck, NetworkCheck
 from webqa_agent.browser.session import BrowserSession
 from webqa_agent.crawler.deep_crawler import DeepCrawler, ElementKey
@@ -99,43 +100,64 @@ class UITester:
         try:
             logging.debug(f"Executing AI instruction: {test_step}")
             self.page = self.driver.get_page()
+
+            # Pre-check if operation is page-agnostic before crawling
+            # This allows page-agnostic operations to execute on PDF/plugin pages
+            is_likely_page_agnostic = self._is_instruction_page_agnostic(test_step)
+
             # Crawl current page state
             dp = DeepCrawler(self.page)
             prev = await dp.crawl(highlight=True, viewport_only=False, cache_dom=True)
 
+            # Extract page status information for LLM context
+            page_status = getattr(prev, 'page_status', 'SUPPORTED')
+            page_type = getattr(prev, 'page_type', 'html')
+
+            # Enhanced unsupported page handling with page-agnostic differentiation
             # Check for unsupported page types (PDF, plugins, etc.)
             if hasattr(prev, 'page_status') and prev.page_status == "UNSUPPORTED_PAGE":
                 page_type = getattr(prev, 'page_type', 'unknown')
-                error_msg = f"Cannot execute action: current page type '{page_type}' is unsupported"
-                logging.error(f"[CRITICAL] {error_msg}")
 
-                end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # Smart differentiation: page-agnostic operations can continue
+                if is_likely_page_agnostic:
+                    logging.warning(
+                        f"[WARNING] Executing '{test_step}' on {page_type} page. "
+                        f"Operation is page-agnostic and will continue in degraded mode (no DOM interaction)."
+                    )
+                    # Page-agnostic operations don't need DOM data, allow execution to continue
+                    # Note: prev will have minimal data, but that's acceptable for browser-level operations
+                else:
+                    # DOM-dependent operation on unsupported page: must abort
+                    error_msg = f"Cannot execute action: current page type '{page_type}' is unsupported"
+                    logging.error(f"[CRITICAL] {error_msg}")
 
-                # Build error step structure
-                error_steps_dict = {
-                    "description": f"action: {test_step}",
-                    "actions": [],
-                    "screenshots": [],
-                    "modelIO": "",
-                    "status": "failed",
-                    "error": error_msg,
-                    "start_time": start_time,
-                    "end_time": end_time,
-                    "dom_diff": {}
-                }
+                    end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                # Build error result
-                error_result = {
-                    "success": False,
-                    "unsupported_page": True,
-                    "page_type": page_type,
-                    "message": error_msg,
-                    "dom_diff": {}
-                }
+                    # Build error step structure
+                    error_steps_dict = {
+                        "description": f"action: {test_step}",
+                        "actions": [],
+                        "screenshots": [],
+                        "modelIO": "",
+                        "status": "failed",
+                        "error": error_msg,
+                        "start_time": start_time,
+                        "end_time": end_time,
+                        "dom_diff": {}
+                    }
 
-                # Store error step
-                self.add_step_data(error_steps_dict, step_type="action")
-                return error_steps_dict, error_result
+                    # Build error result
+                    error_result = {
+                        "success": False,
+                        "unsupported_page": True,
+                        "page_type": page_type,
+                        "message": error_msg,
+                        "dom_diff": {}
+                    }
+
+                    # Store error step
+                    self.add_step_data(error_steps_dict, step_type="action")
+                    return error_steps_dict, error_result
 
             await self._actions.update_element_buffer(prev.raw_dict())
             logging.debug(f"previous dom before action : {prev.to_llm_json()}")
@@ -159,7 +181,14 @@ class UITester:
                 str(ElementKey.CENTER_X),
                 str(ElementKey.CENTER_Y)
             ]
-            user_prompt = self._prepare_prompt_action(test_step, prev.to_llm_json(template=planning_template), LLMPrompt.planner_output_prompt)
+            user_prompt = self._prepare_prompt_action(
+                test_step,
+                prev.to_llm_json(template=planning_template),
+                LLMPrompt.planner_output_prompt,
+                page_status=page_status,
+                page_type=page_type,
+                is_page_agnostic=is_likely_page_agnostic
+            )
 
             # Generate plan
             plan_json = await self._generate_plan(LLMPrompt.planner_system_prompt, user_prompt, marker_screenshot)
@@ -171,11 +200,11 @@ class UITester:
 
             end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # Re-fetch page after execution in case get_new_page was called
+            # Re-fetch page after execution
             # This ensures DOM diff is computed on the correct page
             self.page = self.driver.get_page()
-            dp_after = DeepCrawler(self.page)
-            curr = await dp_after.crawl(highlight=True, viewport_only=False, cache_dom=True)
+            dp.page = self.page
+            curr = await dp.crawl(highlight=True, viewport_only=False, cache_dom=True)
             diff_elems = curr.diff_dict([str(ElementKey.TAG_NAME), str(ElementKey.INNER_TEXT), str(ElementKey.ATTRIBUTES), str(ElementKey.CENTER_X), str(ElementKey.CENTER_Y)])
             if diff_elems:
                 logging.debug(f"Diff element map after action: {diff_elems}")
@@ -199,7 +228,7 @@ class UITester:
                 "status": status_str,
                 "start_time": start_time,
                 "end_time": end_time,
-                "dom_diff": diff_elems,  # 新增：DOM差异信息
+                "dom_diff": diff_elems,  # DOM difference information
             }
 
             # 在execution_result中也添加DOM差异信息
@@ -341,7 +370,12 @@ class UITester:
             f"assertion: {assertion}", page_info, enhanced_prompt, page_structure
         )
 
-    async def verify(self, assertion: str, execution_context: Optional[Dict[str, Any]] = None) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    async def verify(
+        self,
+        assertion: str,
+        execution_context: Optional[Dict[str, Any]] = None,
+        focus_region: Optional[str] = None
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Execute AI-driven assertion verification.
 
         Args:
@@ -354,6 +388,7 @@ class UITester:
                                  "completed_steps": [...],
                                  "failed_steps": [...]
                              }
+            focus_region: Optional page region to focus verification on (e.g., "header navigation", "main content")
 
         Returns:
             Tuple (step_dict, model_output)
@@ -404,45 +439,178 @@ class UITester:
                 self.add_step_data(skip_step, step_type="assertion")
                 return skip_step, skip_result
 
+            # ========================================================================
+            # SCREENSHOT EXTRACTION AND MODE DETECTION
+            # ========================================================================
 
-            page_url, page_title = await self.driver.get_url()
-            logging.debug(f"verification page url: {page_url}, title: {page_title}")
-            # Crawl current page
-            dp = DeepCrawler(self.page)
-            await dp.crawl(highlight=True, filter_text=True, viewport_only=True)
+            # Extract before/after screenshots from execution_context
+            before_screenshot = None
+            after_screenshot = None
 
-            marker_screenshot = await self._actions.b64_page_screenshot(
-                full_page=False,
-                file_name="verification_marker",
-                context="test"
-            )
-            await dp.remove_marker()
+            if execution_context and execution_context.get("last_action"):
+                result = execution_context["last_action"].get("result", {})
+                before_screenshot = result.get("before_screenshot")
+                after_screenshot = result.get("after_screenshot")
 
-            screenshot = await self._actions.b64_page_screenshot(
-                full_page=False,
-                file_name="verification_clean",
-                context="test"
-            )
+            # Validate screenshots if present
+            if before_screenshot and not isinstance(before_screenshot, str):
+                logging.warning("before_screenshot is not a string, treating as missing")
+                before_screenshot = None
+            if after_screenshot and not isinstance(after_screenshot, str):
+                logging.warning("after_screenshot is not a string, treating as missing")
+                after_screenshot = None
 
-            # Get page structure
-            await dp.crawl(highlight=False, filter_text=True, viewport_only=True)
-            page_structure = dp.get_text()
-
-            # Prepare LLM input (context-aware if context available)
-            page_info = f"url: {page_url}, title: {page_title}"
-            if execution_context:
-                logging.debug("Using context-aware verification prompt")
-                user_prompt = self._build_context_aware_prompt(assertion, page_info, page_structure, execution_context)
+            # Determine mode: comparison (both available) or fallback (either missing)
+            if before_screenshot and after_screenshot:
+                mode = "comparison"
+                logging.info("Screenshot comparison mode: ENABLED (both before/after screenshots available)")
             else:
-                logging.debug("Using standard verification prompt")
-                # Prepare LLM input
-                user_prompt = self._prepare_prompt_verify(
-                    f"assertion: {assertion}", page_info, LLMPrompt.verification_prompt, page_structure
+                mode = "fallback"
+                if before_screenshot:
+                    logging.info("Screenshot comparison mode: FALLBACK (only before screenshot available)")
+                elif after_screenshot:
+                    logging.info("Screenshot comparison mode: FALLBACK (only after screenshot available)")
+                else:
+                    logging.info("Screenshot comparison mode: FALLBACK (no before/after screenshots available)")
+
+            # Normalize focus_region: treat empty string as None
+            if focus_region is not None and not focus_region.strip():
+                focus_region = None
+                logging.debug("Empty focus_region provided, treating as None")
+
+            # ========================================================================
+            # MODE EXECUTION: COMPARISON vs FALLBACK
+            # ========================================================================
+
+            if mode == "comparison":
+                # ====================================================================
+                # COMPARISON MODE: Use before + after screenshots
+                # ====================================================================
+                logging.debug("Using comparison mode with before/after screenshots")
+
+                # Prepare images list for LLM (chronological order: before, then after)
+                images_for_llm = [before_screenshot, after_screenshot]
+
+                # Use saved context from action execution time (time-consistent verification)
+                result = execution_context["last_action"].get("result", {})
+                saved_url = result.get("after_action_url")
+                saved_title = result.get("after_action_title")
+                saved_page_structure = result.get("after_action_page_structure")
+
+                # Fallback to current page if saved context not available (backward compatibility)
+                if saved_url and saved_page_structure:
+                    page_url = saved_url
+                    page_title = saved_title
+                    page_structure = saved_page_structure
+                    logging.debug(f"Using saved action-time context: {page_url}")
+                else:
+                    page_url, page_title = await self.driver.get_url()
+                    dp = DeepCrawler(self.page)
+                    await dp.crawl(highlight=False, filter_text=True, viewport_only=False)
+                    page_structure = dp.get_text()
+                    logging.warning("Saved action context not available, using current page state (may cause time mismatch)")
+
+                # Prepare LLM input with comparison instructions
+                page_info = f"url: {page_url}, title: {page_title}"
+
+                # Add focus region guidance if specified
+                region_guidance = ""
+                if focus_region:
+                    region_guidance = f"\n\n**FOCUS REGION**: {focus_region}\n**INSTRUCTION**: Pay primary attention to elements within the '{focus_region}' region when evaluating the assertion."
+                    logging.debug(f"Adding focus region guidance: {focus_region}")
+
+                # Build prompt using dedicated comparison prompts
+                if execution_context:
+                    # Use context-aware comparison prompt
+                    comparison_base_prompt = LLMPrompt.verification_prompt_with_context_comparison.format(
+                        execution_context=self._format_execution_context(execution_context)
+                    )
+                    user_prompt = self._prepare_prompt_verify(
+                        f"assertion: {assertion}", page_info, comparison_base_prompt, page_structure
+                    )
+                else:
+                    # Use standard comparison prompt
+                    comparison_base_prompt = LLMPrompt.verification_prompt_comparison
+                    user_prompt = self._prepare_prompt_verify(
+                        f"assertion: {assertion}", page_info, comparison_base_prompt, page_structure
+                    )
+
+                # Add region guidance if specified
+                if region_guidance:
+                    user_prompt = user_prompt + region_guidance
+
+                # Store screenshots for step data
+                verification_screenshots = [
+                    {"type": "base64", "data": before_screenshot, "label": "Before Action"},
+                    {"type": "base64", "data": after_screenshot, "label": "After Action"}
+                ]
+
+            else:
+                # ====================================================================
+                # FALLBACK MODE: Capture new screenshot (existing behavior)
+                # ====================================================================
+                logging.debug("Using fallback mode - capturing new screenshot")
+
+                # Get page info
+                page_url, page_title = await self.driver.get_url()
+                logging.debug(f"verification page url: {page_url}, title: {page_title}")
+
+                # Crawl current page
+                dp = DeepCrawler(self.page)
+                await dp.crawl(highlight=False, filter_text=True, viewport_only=False)
+
+                # Capture new screenshot
+                screenshot = await self._actions.b64_page_screenshot(
+                    full_page=True,
+                    file_name="verification_clean",
+                    context="test"
                 )
 
-            images_for_llm = [img for img in [marker_screenshot, screenshot] if img]
+                # Prepare images for LLM (single screenshot)
+                images_for_llm = [screenshot] if screenshot else None
+
+                # Get page structure
+                page_structure = dp.get_text()
+
+                # Prepare LLM input (standard or context-aware, NO comparison instructions)
+                page_info = f"url: {page_url}, title: {page_title}"
+
+                # Add focus region guidance if specified
+                region_guidance = ""
+                if focus_region:
+                    region_guidance = f"\n\n**FOCUS REGION**: {focus_region}\n**INSTRUCTION**: Pay primary attention to elements within the '{focus_region}' region when evaluating the assertion. While you should maintain awareness of the full page context, prioritize verification of elements and content specifically within this region."
+                    logging.debug(f"Adding focus region guidance: {focus_region}")
+
+                if execution_context:
+                    logging.debug("Using context-aware verification prompt")
+                    user_prompt = self._build_context_aware_prompt(assertion, page_info, page_structure, execution_context)
+                    if region_guidance:
+                        user_prompt = user_prompt + region_guidance
+                else:
+                    logging.debug("Using standard verification prompt")
+                    base_prompt = LLMPrompt.verification_prompt
+                    if region_guidance:
+                        base_prompt = base_prompt + region_guidance
+                    user_prompt = self._prepare_prompt_verify(
+                        f"assertion: {assertion}", page_info, base_prompt, page_structure
+                    )
+
+                # Store screenshot for step data
+                verification_screenshots = [{"type": "base64", "data": screenshot}] if screenshot else []
+
+            # ========================================================================
+            # LLM CALL (unified for both modes)
+            # ========================================================================
+            # Select appropriate system prompt based on mode
+            if mode == "comparison":
+                system_prompt = LLMPrompt.verification_system_prompt_comparison
+                logging.debug("Using comparison-specific system prompt")
+            else:
+                system_prompt = LLMPrompt.verification_system_prompt
+                logging.debug("Using standard system prompt")
+
             result = await self.llm.get_llm_response(
-                LLMPrompt.verification_system_prompt, user_prompt, images=images_for_llm if images_for_llm else None
+                system_prompt, user_prompt, images=images_for_llm
             )
 
             # Process result
@@ -476,11 +644,8 @@ class UITester:
             }]
             verification_step = {
                 "description": f"verify: {assertion}",
-                "actions": verify_action_list,  # Assertion steps usually don't contain actions
-                "screenshots": (
-                    ([{"type": "base64", "data": marker_screenshot}] if marker_screenshot else []) +
-                    ([{"type": "base64", "data": screenshot}] if screenshot else [])
-                ),
+                "actions": verify_action_list,
+                "screenshots": verification_screenshots,  # Use mode-specific screenshots
                 "modelIO": result if isinstance(result, str) else json.dumps(result, ensure_ascii=False),
                 "status": status_str,
                 "start_time": start_time,
@@ -525,15 +690,88 @@ class UITester:
             # Return error_step and a failed model output
             return error_step, {"Validation Result": "Validation Failed", "Details": error_msg}
 
-    def _prepare_prompt_action(self, test_step: str, browser_elements: str, prompt_template: str) -> str:
-        """Prepare LLM prompt."""
-        return (
-            f"test step: {test_step}\n"
-            f"====================\n"
-            f"pageDescription (interactive elements): {browser_elements}\n"
-            f"====================\n"
-            f"{prompt_template}"
+    def _prepare_prompt_action(
+        self,
+        test_step: str,
+        browser_elements: str,
+        prompt_template: str,
+        page_status: str = "SUPPORTED",
+        page_type: str = "html",
+        is_page_agnostic: bool = False
+    ) -> str:
+        """Prepare LLM prompt with tab context and page status awareness.
+
+        Args:
+            test_step: The test step instruction
+            browser_elements: Interactive elements description
+            prompt_template: The prompt template
+            page_status: Page status (SUPPORTED or UNSUPPORTED_PAGE)
+            page_type: Type of page content (html, pdf, plugin, etc.)
+            is_page_agnostic: Whether this is a page-agnostic browser-level operation
+        """
+        import json
+
+        prompt_parts = [
+            f"test step: {test_step}",
+            "===================="
+        ]
+
+        # Check if DOM is empty or minimal
+        dom_is_empty = (
+            not browser_elements or
+            browser_elements.strip() in ["{}", ""] or
+            browser_elements.strip() == "null"
         )
+
+        # Add special guidance if:
+        # 1. Page is unsupported (PDF, plugin, etc.) - always show guidance
+        # 2. Operation is page-agnostic - ALWAYS show guidance (regardless of DOM state)
+        # Rationale: Page-agnostic operations (GoBack, GoToPage, Sleep)
+        # fundamentally don't require DOM elements, so guidance should always be shown
+        should_add_guidance = (
+            page_status == "UNSUPPORTED_PAGE" or
+            is_page_agnostic  # Removed dom_is_empty check - always guide for page-agnostic ops
+        )
+
+        if should_add_guidance:
+            # Determine appropriate status message based on actual page state
+            if page_status == "UNSUPPORTED_PAGE":
+                status_message = f"Current page is {page_type} content (non-HTML). DOM interaction not possible."
+            elif dom_is_empty:
+                status_message = "Current page has no interactive elements (empty DOM or minimal content)."
+            else:
+                # Safety fallback (shouldn't reach here due to condition logic)
+                status_message = "Note: This is a browser-level operation."
+
+            # Log diagnostic information for debugging
+            logging.debug(
+                f"Adding page-agnostic guidance: page_status={page_status}, "
+                f"is_page_agnostic={is_page_agnostic}, dom_is_empty={dom_is_empty}, "
+                f"instruction='{test_step[:60]}...'"
+            )
+
+            prompt_parts.extend([
+                f"⚠️ **OPERATION TYPE**: Page-agnostic browser-level operation",
+                f"**PAGE STATUS**: {page_status}",
+                f"**IMPORTANT**: {status_message}",
+                "",
+                "**ALLOWED ACTIONS** (work at browser level, no DOM needed):",
+                "  - GoBack, GoToPage: Browser navigation",
+                "  - Sleep: Utility operations",
+                "",
+                "**FORBIDDEN ACTIONS** (require DOM elements):",
+                "  - Tap, Input, Hover, Scroll, SelectDropdown",
+                "",
+                "**CRITICAL**: Plan the page-agnostic action even when pageDescription is empty!",
+                "**DO NOT**: Return empty actions array for browser-level operations.",
+                "===================="
+            ])
+
+        prompt_parts.append(f"pageDescription (interactive elements): {browser_elements}")
+        prompt_parts.append("====================")
+        prompt_parts.append(prompt_template)
+
+        return "\n".join(prompt_parts)
 
     def _prepare_prompt_verify(self, test_step: str, page_info: str, prompt_template: str, page_structure: str) -> str:
         """Prepare LLM prompt."""
@@ -586,6 +824,13 @@ class UITester:
         execute_results = []
         action_count = len(plan_json.get("actions", []))
 
+        # Capture initial screenshot BEFORE any actions (plan-level before state)
+        initial_screenshot = await self._actions.b64_page_screenshot(
+            full_page=True,
+            file_name="plan_initial_screenshot",
+            context="verify"
+        )
+
         for index, action in enumerate(plan_json.get("actions", []), 1):
             action_desc = f"{action.get('type', 'Unknown')}"
             logging.debug(f"Executing step {index}/{action_count}: {action_desc}")
@@ -632,15 +877,75 @@ class UITester:
 
                 if not success:
                     logging.error(f"Action {index} failed: {message}")
+                    # Capture final screenshot even on failure
+                    final_screenshot = await self._actions.b64_page_screenshot(
+                        full_page=True,
+                        file_name="plan_final_screenshot_failed",
+                        context="verify"
+                    )
+                    # Capture page context at failure time (for time-consistent verification)
+                    try:
+                        after_action_url, after_action_title = await self.driver.get_url()
+                    except Exception:
+                        after_action_url, after_action_title = "", ""
+                    # Add plan-level screenshots and context to failure result
+                    action_result["before_screenshot"] = initial_screenshot
+                    action_result["after_screenshot"] = final_screenshot
+                    action_result["after_action_url"] = after_action_url
+                    action_result["after_action_title"] = after_action_title
+                    action_result["after_action_page_structure"] = ""  # 失败场景可为空
                     return execute_results, action_result
 
             except Exception as e:
                 error_msg = f"Action {index} failed with error: {str(e)}"
                 logging.error(error_msg)
-                failure_result = {"success": False, "message": f"Exception occurred: {str(e)}", "screenshot": None}
+                # Capture final screenshot even on exception
+                try:
+                    final_screenshot = await self._actions.b64_page_screenshot(
+                        full_page=True,
+                        file_name="plan_final_screenshot_exception",
+                        context="verify"
+                    )
+                except:
+                    final_screenshot = None
+
+                # Capture page context at exception time (for time-consistent verification)
+                try:
+                    after_action_url, after_action_title = await self.driver.get_url()
+                except Exception:
+                    after_action_url, after_action_title = "", ""
+
+                failure_result = {
+                    "success": False,
+                    "message": f"Exception occurred: {str(e)}",
+                    "screenshot": None,
+                    "before_screenshot": initial_screenshot,
+                    "after_screenshot": final_screenshot,
+                    "after_action_url": after_action_url,
+                    "after_action_title": after_action_title,
+                    "after_action_page_structure": ""  # 异常场景可为空
+                }
                 return execute_results, failure_result
 
         logging.debug("All actions executed successfully")
+        # Capture final screenshot AFTER all actions (plan-level after state)
+        final_screenshot = await self._actions.b64_page_screenshot(
+            full_page=True,
+            file_name="plan_final_screenshot",
+            context="verify"
+        )
+
+        # Capture page context at action completion time (for time-consistent verification)
+        try:
+            after_action_url, after_action_title = await self.driver.get_url()
+            dp_after = DeepCrawler(self.page)
+            await dp_after.crawl(highlight=False, filter_text=True, viewport_only=False)
+            after_action_page_structure = dp_after.get_text()[:5000]  # 限制长度避免内存开销
+        except Exception as e:
+            logging.warning(f"Failed to capture action-time context: {str(e)}")
+            after_action_url, after_action_title = "", ""
+            after_action_page_structure = ""
+
         post_action_ss = await self._actions.b64_page_screenshot(
             file_name="final_success",
             context="test"
@@ -649,6 +954,11 @@ class UITester:
             "success": True,
             "message": "All actions executed successfully",
             "screenshot": post_action_ss,
+            "before_screenshot": initial_screenshot,
+            "after_screenshot": final_screenshot,
+            "after_action_url": after_action_url,
+            "after_action_title": after_action_title,
+            "after_action_page_structure": after_action_page_structure,
         }
 
     def get_monitoring_results(self) -> Dict[str, Any]:
@@ -867,9 +1177,99 @@ class UITester:
         self.step_counter = 0
 
     async def get_current_page(self):
-        try:
-            if self.driver:
-                return await self.driver.get_new_page()
-        except Exception as e:
-            logging.warning(f"UITester.get_current_page failed to detect new page: {e}")
         return self.driver.get_page()
+
+    def _is_instruction_page_agnostic(self, test_step: str) -> bool:
+        """Check if instruction likely represents a page-agnostic operation.
+
+        Uses priority-based detection to prevent false positives:
+        1. DOM operations (HIGHEST PRIORITY) → NOT page-agnostic
+        2. Action type names → page-agnostic
+        3. Page-agnostic phrases → page-agnostic
+
+        Page-agnostic operations work at browser level and don't require DOM elements:
+        - Browser navigation: GoBack, GoForward, GoToPage
+        - Utility: Sleep
+
+        Args:
+            test_step: The test step instruction
+
+        Returns:
+            True if operation is likely page-agnostic, False otherwise
+
+        Examples:
+            >>> self._is_instruction_page_agnostic("Tap button to switch back")
+            False  # "Tap" indicates DOM operation
+            >>> self._is_instruction_page_agnostic("Go back to previous page")
+            True   # Legitimate navigation
+            >>> self._is_instruction_page_agnostic("Click the back button")
+            False  # "Click" indicates DOM operation
+        """
+        # Normalize instruction for case-insensitive matching
+        instruction_lower = test_step.lower().replace('_', ' ').replace('-', ' ')
+
+        # ========================================================================
+        # PRIORITY 1: Check for explicit DOM operations (HIGHEST PRIORITY)
+        # ========================================================================
+        # If instruction explicitly mentions DOM operations, it's NOT page-agnostic
+        # This prevents false positives from ambiguous keywords like "back"
+        DOM_OPERATION_INDICATORS = [
+            # Click/Tap operations
+            'tap', 'click', 'press', 'touch',
+            # Input operations
+            'input', 'type', 'enter', 'fill',
+            # Selection operations
+            'select', 'choose', 'dropdown',
+            # Mouse operations
+            'hover', 'mouse over',
+            # Scroll operations
+            'scroll', 'swipe',
+            # Drag operations
+            'drag', 'drop',
+            # Upload operations
+            'upload', 'attach',
+            # UI state changes (these require DOM interaction)
+            'toggle', 'switch',  # e.g., "toggle button"
+            'check', 'uncheck',  # checkboxes
+            'expand', 'collapse',  # accordions
+        ]
+
+        for dom_keyword in DOM_OPERATION_INDICATORS:
+            if dom_keyword in instruction_lower:
+                logging.debug(
+                    f"DOM operation '{dom_keyword}' detected in '{test_step[:60]}...' "
+                    f"→ instruction is NOT page-agnostic"
+                )
+                return False
+
+        # ========================================================================
+        # PRIORITY 2: Check for action type names in instruction
+        # ========================================================================
+        # Handle cases where LLM uses action type directly in description
+        for action_type in [ActionType.GO_BACK, ActionType.SLEEP]:
+            # Case-insensitive check (handles "GoBack", "goback", "go back")
+            if action_type.lower() in instruction_lower:
+                logging.debug(
+                    f"Action type '{action_type}' detected in '{test_step[:60]}...' "
+                    f"→ instruction IS page-agnostic"
+                )
+                return True
+
+        # ========================================================================
+        # PRIORITY 3: Check for page-agnostic phrases
+        # ========================================================================
+        # Use refined keyword list with contextual phrases only
+        PAGE_AGNOSTIC_KEYWORDS = get_page_agnostic_keywords()
+
+        for keyword in PAGE_AGNOSTIC_KEYWORDS:
+            if keyword in instruction_lower:
+                logging.debug(
+                    f"Page-agnostic keyword '{keyword}' detected in '{test_step[:60]}...' "
+                    f"→ instruction IS page-agnostic"
+                )
+                return True
+
+        # ========================================================================
+        # DEFAULT: Assume DOM-dependent (safe default)
+        # ========================================================================
+        return False

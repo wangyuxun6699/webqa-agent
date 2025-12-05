@@ -138,8 +138,21 @@ class ActionHandler:
         self.page = page
         if cookies:
             try:
-                cookies = json.loads(cookies)
-                await self.page.context.add_cookies(cookies)
+                # Unified format handling: support JSON string, dict, list
+                cookie_list: list
+                if isinstance(cookies, str):
+                    cookie_list = json.loads(cookies)      # JSON string → list
+                elif isinstance(cookies, dict):
+                    cookie_list = [cookies]                 # dict → list
+                elif isinstance(cookies, (list, tuple)):
+                    cookie_list = list(cookies)             # list/tuple → list
+                else:
+                    raise TypeError(f"Unsupported cookies type: {type(cookies)}")
+
+                if not isinstance(cookie_list, list):
+                    raise ValueError("Parsed cookies is not a list")
+
+                await self.page.context.add_cookies(cookie_list)
             except Exception as e:
                 raise Exception(f'add context cookies error: {e}')
 
@@ -266,102 +279,610 @@ class ActionHandler:
         """Set the page element buffer for action execution."""
         self.page_element_buffer = element_buffer
 
-    async def scroll(self, direction: str = 'down', scrollType: str = 'once', distance: Optional[int] = None) -> bool:
-        """Scroll page.
+    async def scroll(self, element_id: str, max_retries: int = 3, base_wait_time: float = 0.5) -> bool:
+        """Scroll to a specific element, making it visible in the viewport.
+        
+        This method scrolls the page to bring the target element into view.
+        It uses Playwright's scroll_into_view_if_needed with fallback strategies.
+        
+        For custom scroll behavior (horizontal scrolling, precise distance control),
+        use the Mouse wheel action instead.
+        
         Args:
-            direction: 'up' or 'down'
-            scrollType: 'once' or 'untilBottom' or 'untilTop'
-            distance: None or Number
+            element_id: The ID of the element to scroll to
+            max_retries: Maximum retry attempts for lazy-loaded content (default: 3)
+            base_wait_time: Base wait time in seconds, will be adaptive (default: 0.5)
 
         Returns:
-            bool: Whether scroll operation was performed
+            bool: Whether scroll to element was successful
         """
-        logging.debug('Start scrolling page')
+        logging.debug(f'Start scrolling to element {element_id}')
         
         # Get current active page
         page = self._get_current_page()
 
-        # Validate inputs to avoid silent no-ops
-        allowed_directions = {'up', 'down'}
-        allowed_scroll_types = {'once', 'untilBottom', 'untilTop'}
+        # Initialize action context for error propagation
+        ctx = ActionContext()
+        action_context_var.set(ctx)
+        ctx.max_scroll_attempts = max_retries
+        ctx.element_info = {"element_id": element_id, "action": "scroll"}
 
-        if direction not in allowed_directions:
-            logging.error(f"Invalid direction '{direction}'. Allowed: {sorted(list(allowed_directions))}")
+        # Get element from buffer
+        element = self.page_element_buffer.get(str(element_id))
+        if not element:
+            logging.warning(f'Element {element_id} not found in buffer for scroll')
+            ctx.set_error(
+                ERROR_ELEMENT_NOT_FOUND,
+                f"Element {element_id} not found in page element buffer",
+                element_id=element_id
+            )
             return False
 
-        if scrollType not in allowed_scroll_types:
-            logging.error(f"Invalid scrollType '{scrollType}'. Allowed: {sorted(list(allowed_scroll_types))}")
-            return False
+        # Check if element is already in viewport
+        is_in_viewport = element.get('isInViewport', True)
+        if is_in_viewport:
+            logging.debug(f'Element {element_id} already in viewport, no scroll needed')
+            return True
 
-        if distance is not None:
+        logging.info(f'Element {element_id} is outside viewport, scrolling to make it visible')
+
+        # Get element selectors
+        selector = element.get('selector')
+        xpath = element.get('xpath')
+
+        # Retry loop for handling lazy-loaded content
+        for attempt in range(max_retries):
             try:
-                distance = int(distance)
-            except (TypeError, ValueError):
-                logging.error(f"Invalid distance '{distance}'. Must be an integer or None")
-                return False
-            if distance < 0:
-                logging.error(f"Invalid distance '{distance}'. Must be >= 0")
-                return False
+                ctx.scroll_attempts = attempt + 1
+                # Adaptive wait time increases with retries for slow-loading content
+                current_wait_time = base_wait_time * (1 + attempt * 0.5)
 
-        async def perform_scroll():  # Execute scroll operation
-            if direction == 'up':
-                await page.evaluate(f'(document.scrollingElement || document.body).scrollTop -= {distance};')
-            elif direction == 'down':
-                await page.evaluate(f'(document.scrollingElement || document.body).scrollTop += {distance};')
+                # Strategy 1: Use Playwright's scroll_into_view_if_needed (most reliable)
+                if self._is_valid_css_selector(selector):
+                    try:
+                        ctx.attempted_strategies.append(f"css_selector_attempt_{attempt + 1}")
+                        await page.locator(selector).scroll_into_view_if_needed(timeout=5000)
+                        logging.debug(f'Scrolled to element {element_id} using CSS selector (attempt {attempt + 1})')
 
-        if not distance:
-            distance = int(await page.evaluate('window.innerHeight') / 2)
-            logging.debug(f'Scrolling distance: {distance}')
+                        # Wait for scroll animation + potential lazy-loading
+                        await asyncio.sleep(current_wait_time)
 
-        if scrollType == 'once':
-            await perform_scroll()
+                        # Verify page stability after scroll (for dynamic content)
+                        await self._wait_for_page_stability()
+
+                        # Verify element is actually in viewport using bounding_box
+                        try:
+                            rect = await page.locator(selector).bounding_box()
+                            if rect:
+                                viewport_height = await page.evaluate('window.innerHeight')
+                                viewport_width = await page.evaluate('window.innerWidth')
+                                is_visible = (rect['y'] >= 0 and rect['y'] < viewport_height and
+                                              rect['x'] >= 0 and rect['x'] < viewport_width)
+                                if is_visible:
+                                    logging.debug(f'Element {element_id} verified in viewport at ({rect["x"]:.1f}, {rect["y"]:.1f})')
+                                else:
+                                    logging.warning(f'Element {element_id} scrolled but still outside viewport: y={rect["y"]:.1f}, viewport_height={viewport_height}')
+                        except Exception as verify_error:
+                            logging.debug(f'Could not verify viewport position for element {element_id}: {verify_error}')
+
+                        return True
+                    except Exception as css_error:
+                        ctx.playwright_error = str(css_error)
+                        if attempt < max_retries - 1:
+                            logging.debug(f'CSS selector scroll failed on attempt {attempt + 1}: {css_error}, retrying...')
+                            await asyncio.sleep(current_wait_time)
+                            continue
+                        else:
+                            logging.debug(f'CSS selector scroll failed after {max_retries} attempts: {css_error}, trying XPath')
+
+                # Strategy 2: Try XPath if CSS fails
+                if xpath:
+                    try:
+                        ctx.attempted_strategies.append(f"xpath_attempt_{attempt + 1}")
+                        await page.locator(f'xpath={xpath}').scroll_into_view_if_needed(timeout=5000)
+                        logging.debug(f'Scrolled to element {element_id} using XPath (attempt {attempt + 1})')
+
+                        # Wait for scroll animation + potential lazy-loading
+                        await asyncio.sleep(current_wait_time)
+
+                        # Verify page stability after scroll
+                        await self._wait_for_page_stability()
+
+                        # Verify element is actually in viewport using bounding_box
+                        try:
+                            rect = await page.locator(f'xpath={xpath}').bounding_box()
+                            if rect:
+                                viewport_height = await page.evaluate('window.innerHeight')
+                                viewport_width = await page.evaluate('window.innerWidth')
+                                is_visible = (rect['y'] >= 0 and rect['y'] < viewport_height and
+                                              rect['x'] >= 0 and rect['x'] < viewport_width)
+                                if is_visible:
+                                    logging.debug(f'Element {element_id} verified in viewport at ({rect["x"]:.1f}, {rect["y"]:.1f})')
+                                else:
+                                    logging.warning(f'Element {element_id} scrolled but still outside viewport: y={rect["y"]:.1f}, viewport_height={viewport_height}')
+                        except Exception as verify_error:
+                            logging.debug(f'Could not verify viewport position for element {element_id}: {verify_error}')
+
+                        return True
+                    except Exception as xpath_error:
+                        ctx.playwright_error = str(xpath_error)
+                        if attempt < max_retries - 1:
+                            logging.debug(f'XPath scroll failed on attempt {attempt + 1}: {xpath_error}, retrying...')
+                            await asyncio.sleep(current_wait_time)
+                            continue
+                        else:
+                            logging.debug(f'XPath scroll failed after {max_retries} attempts: {xpath_error}, trying coordinate-based scroll')
+
+                # Strategy 3: Fallback to coordinate-based scrolling
+                center_y = element.get('center_y')
+                if center_y is not None:
+                    ctx.attempted_strategies.append(f"coordinates_attempt_{attempt + 1}")
+                    viewport_height = await page.evaluate('window.innerHeight')
+
+                    # Calculate target scroll position (center element in viewport)
+                    target_scroll_y = center_y - viewport_height / 2
+                    target_scroll_y = max(0, target_scroll_y)  # Don't scroll above page top
+
+                    # Log scroll operation for debugging
+                    current_scroll_y = await page.evaluate('window.scrollY')
+                    logging.debug(f'Scrolling element {element_id}: current scroll position={current_scroll_y}, target scroll position={target_scroll_y}')
+
+                    # Perform scroll with smooth behavior
+                    await page.evaluate(f'window.scrollTo({{top: {target_scroll_y}, behavior: "smooth"}})')
+                    logging.debug(f'Scrolled to element {element_id} using coordinates (y={target_scroll_y}, attempt {attempt + 1})')
+
+                    # Adaptive wait time for smooth scroll + lazy loading
+                    await asyncio.sleep(current_wait_time + 0.3)
+
+                    # Verify page stability after scroll
+                    page_stable = await self._wait_for_page_stability()
+                    if not page_stable and attempt == max_retries - 1:
+                        ctx.set_error(
+                            ERROR_SCROLL_TIMEOUT,
+                            f"Element {element_id} scroll succeeded but page content unstable after {max_retries} attempts",
+                            selector=selector,
+                            xpath=xpath,
+                            center_y=center_y
+                        )
+
+                    return True
+
+                # If all strategies failed but we have more retries, wait and continue
+                if attempt < max_retries - 1:
+                    logging.debug(f'All scroll strategies failed on attempt {attempt + 1}, waiting before retry...')
+                    await asyncio.sleep(current_wait_time * 2)
+                    continue
+
+            except Exception as e:
+                ctx.playwright_error = str(e)
+                if attempt < max_retries - 1:
+                    logging.warning(f'Error scrolling to element {element_id} on attempt {attempt + 1}: {e}, retrying...')
+                    await asyncio.sleep(current_wait_time)
+                    continue
+                else:
+                    logging.error(f'Error scrolling to element {element_id} after {max_retries} attempts: {e}')
+                    ctx.set_error(
+                        ERROR_SCROLL_FAILED,
+                        f"All scroll strategies failed after {max_retries} attempts with exception: {str(e)}",
+                        selector=selector,
+                        xpath=xpath
+                    )
+                    return False
+
+        # Final failure: all retries exhausted
+        logging.warning(f'Could not scroll to element {element_id} after {max_retries} attempts: no valid selectors or all strategies failed')
+        ctx.set_error(
+            ERROR_SCROLL_FAILED,
+            f"Could not scroll to element {element_id}: no valid selectors or all strategies failed",
+            selector=selector,
+            xpath=xpath
+        )
+        return False
+
+    async def ensure_element_in_viewport(self, element_id: str, max_retries: int = 3, base_wait_time: float = 0.5) -> bool:
+        """Ensure element is in viewport by scrolling if needed with enhanced edge case handling.
+
+        This method enables full-page planning mode where elements can be planned
+        from a full-page screenshot but may be outside the viewport during execution.
+
+        Handles edge cases:
+        - Lazy-loaded content that appears after scrolling
+        - Infinite scroll pages with dynamic content
+        - Slow-loading pages with delayed element rendering
+
+        Args:
+            element_id: Element ID to scroll to
+            max_retries: Maximum retry attempts for lazy-loaded content (default: 3)
+            base_wait_time: Base wait time in seconds, will be adaptive (default: 0.5)
+
+        Returns:
+            bool: True if element is in viewport (or successfully scrolled to), False otherwise
+        """
+        # Get current active page
+        page = self._get_current_page()
+
+        # Get existing context or create new one (preserves parent context)
+        ctx = action_context_var.get()
+        if ctx is None:
+            ctx = ActionContext()
+            action_context_var.set(ctx)
+
+        # Update scroll-specific context info
+        ctx.max_scroll_attempts = max_retries
+        # Only set element_info if not already set by parent method
+        if not ctx.element_info.get("element_id"):
+            ctx.element_info = {"element_id": element_id, "action": "ensure_viewport"}
+
+        element = self.page_element_buffer.get(str(element_id))
+        if not element:
+            logging.warning(f'Element {element_id} not found in buffer for viewport check')
+            ctx.set_error(
+                ERROR_ELEMENT_NOT_FOUND,
+                f"Element {element_id} not found in page element buffer",
+                element_id=element_id
+            )
+            return False
+
+        # Check if element is already in viewport
+        is_in_viewport = element.get('isInViewport', True)
+        if is_in_viewport:
+            logging.debug(f'Element {element_id} already in viewport, no scroll needed')
             return True
 
-        elif scrollType == 'untilBottom':
-            prev_scroll = -1  # Record last scroll position, avoid stuck
+        logging.info(f'Element {element_id} is outside viewport, scrolling to make it visible')
 
-            while True:
-                # Get current scroll position and page total height
-                current_scroll = await page.evaluate('window.scrollY')
-                current_scroll_height = await page.evaluate('document.body.scrollHeight')
+        # Get element selectors
+        selector = element.get('selector')
+        xpath = element.get('xpath')
 
-                # Check if page is scrolled to the bottom
-                if current_scroll == prev_scroll:
-                    logging.debug('No further scroll possible, reached the bottom.')
-                    break
+        # Retry loop for handling lazy-loaded content
+        for attempt in range(max_retries):
+            try:
+                ctx.scroll_attempts = attempt + 1
+                # Adaptive wait time increases with retries for slow-loading content
+                current_wait_time = base_wait_time * (1 + attempt * 0.5)
 
-                # Until bottom
-                if current_scroll + distance >= current_scroll_height:
-                    distance = current_scroll_height - current_scroll
-                    logging.debug(f'Adjusting last scroll distance to {distance}')
+                # Strategy 1: Use Playwright's scroll_into_view_if_needed (most reliable)
+                if self._is_valid_css_selector(selector):
+                    try:
+                        ctx.attempted_strategies.append(f"css_selector_attempt_{attempt + 1}")
+                        await page.locator(selector).scroll_into_view_if_needed(timeout=5000)
+                        logging.debug(f'Scrolled to element {element_id} using CSS selector (attempt {attempt + 1})')
 
-                prev_scroll = current_scroll
-                await perform_scroll()
-                await asyncio.sleep(1)
+                        # Wait for scroll animation + potential lazy-loading
+                        await asyncio.sleep(current_wait_time)
 
-            return True
+                        # Verify page stability after scroll (for dynamic content)
+                        await self._wait_for_page_stability()
 
-        elif scrollType == 'untilTop':
-            prev_scroll = -1
+                        # Verify element is actually in viewport using bounding_box
+                        try:
+                            rect = await page.locator(selector).bounding_box()
+                            if rect:
+                                viewport_height = await page.evaluate('window.innerHeight')
+                                viewport_width = await page.evaluate('window.innerWidth')
+                                is_in_viewport = (rect['y'] >= 0 and rect['y'] < viewport_height and
+                                                rect['x'] >= 0 and rect['x'] < viewport_width)
+                                if is_in_viewport:
+                                    logging.debug(f'Element {element_id} verified in viewport at ({rect["x"]:.1f}, {rect["y"]:.1f})')
+                                else:
+                                    logging.warning(f'Element {element_id} scrolled but still outside viewport: y={rect["y"]:.1f}, viewport_height={viewport_height}')
+                        except Exception as verify_error:
+                            logging.debug(f'Could not verify viewport position for element {element_id}: {verify_error}')
 
-            while True:
-                current_scroll = await page.evaluate('window.scrollY')
+                        return True
+                    except Exception as css_error:
+                        ctx.playwright_error = str(css_error)
+                        if attempt < max_retries - 1:
+                            logging.debug(f'CSS selector scroll failed on attempt {attempt + 1}: {css_error}, retrying...')
+                            await asyncio.sleep(current_wait_time)
+                            continue
+                        else:
+                            logging.debug(f'CSS selector scroll failed after {max_retries} attempts: {css_error}, trying XPath')
 
-                # If already at top or no progress, stop
-                if current_scroll <= 0 or current_scroll == prev_scroll:
-                    logging.debug('No further scroll possible, reached the top.')
-                    break
+                # Strategy 2: Try XPath if CSS fails
+                if xpath:
+                    try:
+                        ctx.attempted_strategies.append(f"xpath_attempt_{attempt + 1}")
+                        await page.locator(f'xpath={xpath}').scroll_into_view_if_needed(timeout=5000)
+                        logging.debug(f'Scrolled to element {element_id} using XPath (attempt {attempt + 1})')
 
-                # Adjust last scroll to not go past top
-                if current_scroll - distance <= 0:
-                    distance = current_scroll
-                    logging.debug(f'Adjusting last scroll distance to {distance}')
+                        # Wait for scroll animation + potential lazy-loading
+                        await asyncio.sleep(current_wait_time)
 
-                prev_scroll = current_scroll
-                await perform_scroll()
-                await asyncio.sleep(1)
+                        # Verify page stability after scroll
+                        await self._wait_for_page_stability()
 
-            return True
+                        # Verify element is actually in viewport using bounding_box
+                        try:
+                            rect = await page.locator(f'xpath={xpath}').bounding_box()
+                            if rect:
+                                viewport_height = await page.evaluate('window.innerHeight')
+                                viewport_width = await page.evaluate('window.innerWidth')
+                                is_in_viewport = (rect['y'] >= 0 and rect['y'] < viewport_height and
+                                                rect['x'] >= 0 and rect['x'] < viewport_width)
+                                if is_in_viewport:
+                                    logging.debug(f'Element {element_id} verified in viewport at ({rect["x"]:.1f}, {rect["y"]:.1f})')
+                                else:
+                                    logging.warning(f'Element {element_id} scrolled but still outside viewport: y={rect["y"]:.1f}, viewport_height={viewport_height}')
+                        except Exception as verify_error:
+                            logging.debug(f'Could not verify viewport position for element {element_id}: {verify_error}')
+
+                        return True
+                    except Exception as xpath_error:
+                        ctx.playwright_error = str(xpath_error)
+                        if attempt < max_retries - 1:
+                            logging.debug(f'XPath scroll failed on attempt {attempt + 1}: {xpath_error}, retrying...')
+                            await asyncio.sleep(current_wait_time)
+                            continue
+                        else:
+                            logging.debug(f'XPath scroll failed after {max_retries} attempts: {xpath_error}, trying coordinate-based scroll')
+
+                # Strategy 3: Fallback to coordinate-based scrolling with retry support
+                center_y = element.get('center_y')
+                if center_y is not None:
+                    ctx.attempted_strategies.append(f"coordinates_attempt_{attempt + 1}")
+                    viewport_height = await page.evaluate('window.innerHeight')
+                    current_scroll_y = await page.evaluate('window.scrollY')
+
+                    # Calculate target scroll position (center element in viewport)
+                    target_scroll_y = center_y - viewport_height / 2
+                    target_scroll_y = max(0, target_scroll_y)  # Don't scroll above page top
+
+                    # Log scroll operation for debugging
+                    logging.debug(f'Scrolling element {element_id}: current scroll position={current_scroll_y}, target scroll position={target_scroll_y}')
+
+                    # Perform scroll with smooth behavior
+                    await page.evaluate(f'window.scrollTo({{top: {target_scroll_y}, behavior: "smooth"}})')
+                    logging.debug(f'Scrolled to element {element_id} using coordinates (y={target_scroll_y}, attempt {attempt + 1})')
+
+                    # Adaptive wait time for smooth scroll + lazy loading
+                    await asyncio.sleep(current_wait_time + 0.3)  # Extra time for smooth scroll
+
+                    # Verify page stability after scroll
+                    page_stable = await self._wait_for_page_stability()
+                    if not page_stable:
+                        # Page not stable, likely lazy-loading
+                        if attempt == max_retries - 1:
+                            ctx.set_error(
+                                ERROR_SCROLL_TIMEOUT,
+                                f"Element {element_id} viewport positioning succeeded but page content unstable after {max_retries} attempts, possible lazy-loading or infinite scroll",
+                                selector=selector,
+                                xpath=xpath,
+                                center_y=center_y
+                            )
+
+                    # Verify scroll position (coordinate-based scroll may not work with scroll containers)
+                    actual_scroll_y = await page.evaluate('window.scrollY')
+                    if abs(actual_scroll_y - target_scroll_y) > 10:
+                        logging.warning(
+                            f'Coordinate-based scroll for element {element_id} may have failed: '
+                            f'target={target_scroll_y:.1f}, actual={actual_scroll_y:.1f}. '
+                            f'This may indicate scroll containers.'
+                        )
+
+                    return True
+
+                # If all strategies failed but we have more retries, wait and continue
+                if attempt < max_retries - 1:
+                    logging.debug(f'All scroll strategies failed on attempt {attempt + 1}, waiting before retry...')
+                    await asyncio.sleep(current_wait_time * 2)  # Longer wait between full retry cycles
+                    continue
+
+            except Exception as e:
+                ctx.playwright_error = str(e)
+                if attempt < max_retries - 1:
+                    logging.warning(f'Error scrolling to element {element_id} on attempt {attempt + 1}: {e}, retrying...')
+                    await asyncio.sleep(current_wait_time)
+                    continue
+                else:
+                    logging.error(f'Error scrolling to element {element_id} after {max_retries} attempts: {e}')
+                    ctx.set_error(
+                        ERROR_SCROLL_FAILED,
+                        f"All scroll strategies failed after {max_retries} attempts with exception: {str(e)}",
+                        selector=selector,
+                        xpath=xpath
+                    )
+                    return False
+
+        # Final failure: all retries exhausted
+        logging.warning(f'Could not scroll to element {element_id} after {max_retries} attempts: no valid selectors or all strategies failed')
+        ctx.set_error(
+            ERROR_SCROLL_FAILED,
+            f"Could not scroll to element after {max_retries} attempts: no valid selectors or all scroll strategies (CSS, XPath, coordinates) failed",
+            selector=selector,
+            xpath=xpath,
+            has_valid_selector=self._is_valid_css_selector(selector) if selector else False,
+            has_xpath=xpath is not None,
+            has_coordinates=element.get('center_y') is not None
+        )
+        return False
+
+    async def _wait_for_page_stability(self, timeout: float = 2.0, check_interval: float = 0.5) -> bool:
+        """Wait for page to stabilize after scroll (handles lazy-loading and dynamic content).
+
+        Args:
+            timeout: Maximum time to wait for stability (default: 2.0 seconds)
+            check_interval: Interval between stability checks (default: 0.5 seconds)
+
+        Returns:
+            bool: True if page stabilized, False if timeout reached
+        """
+        # Get current active page
+        page = self._get_current_page()
+        
+        try:
+            elapsed = 0.0
+            last_height = await page.evaluate('document.body.scrollHeight')
+
+            while elapsed < timeout:
+                await asyncio.sleep(check_interval)
+                elapsed += check_interval
+
+                current_height = await page.evaluate('document.body.scrollHeight')
+
+                # If page height hasn't changed, consider it stable
+                if current_height == last_height:
+                    logging.debug(f'Page stabilized after {elapsed:.1f}s')
+                    return True
+
+                last_height = current_height
+
+            logging.debug(f'Page stability timeout after {timeout}s (content may still be loading)')
+            return False
+
+        except Exception as e:
+            logging.warning(f'Error checking page stability: {e}')
+            return False
+
+    async def _convert_document_to_viewport_coords(self, x: float, y: float) -> tuple[float, float]:
+        """Convert document coordinates to viewport coordinates.
+
+        Document coordinates are relative to the entire page (top-left of document).
+        Viewport coordinates are relative to the visible area (top-left of viewport).
+
+        Playwright's mouse operations use viewport coordinates, while our crawler
+        captures document coordinates. This method performs the necessary conversion.
+
+        **IMPORTANT NOTE**: This method only works correctly with window-level scrolling.
+        For pages using scroll containers (elements with overflow: auto/scroll), the
+        window.pageYOffset will be 0 even after scrolling, causing incorrect conversion.
+        In such cases, use element.bounding_box() to get fresh viewport coordinates instead.
+
+        Args:
+            x: Document X coordinate (from element center_x)
+            y: Document Y coordinate (from element center_y)
+
+        Returns:
+            Tuple of (viewport_x, viewport_y)
+
+        Example:
+            # Element at document position (500, 1200) with scroll at (0, 800)
+            # viewport_y = 1200 - 800 = 400 (element is 400px from top of viewport)
+        """
+        # Get current active page
+        page = self._get_current_page()
+        
+        # Get window scroll offset (only reflects window-level scrolling, not scroll containers)
+        scroll_x = await page.evaluate('window.pageXOffset || document.documentElement.scrollLeft')
+        scroll_y = await page.evaluate('window.pageYOffset || document.documentElement.scrollTop')
+
+        # Detect potential scroll container issues
+        # If coordinates are large but scroll offset is 0, likely using scroll containers
+        if (abs(x) > 100 or abs(y) > 100) and scroll_x == 0 and scroll_y == 0:
+            # Check if page has scroll containers
+            has_scroll_containers = await page.evaluate('''() => {
+                const scrollContainers = document.querySelectorAll('[style*="overflow"]');
+                const computedScrollContainers = Array.from(document.querySelectorAll('*')).filter(el => {
+                    const style = window.getComputedStyle(el);
+                    return (style.overflow === 'auto' || style.overflow === 'scroll' ||
+                            style.overflowY === 'auto' || style.overflowY === 'scroll');
+                });
+                return scrollContainers.length > 0 || computedScrollContainers.length > 0;
+            }''')
+
+            if has_scroll_containers:
+                logging.warning(
+                    f'Coordinate conversion may be inaccurate: document coords=({x}, {y}), '
+                    f'but window scroll offset=(0, 0) with scroll containers detected. '
+                    f'This indicates overflow scrolling. Consider using bounding_box() instead.'
+                )
+
+        viewport_x = x - scroll_x
+        viewport_y = y - scroll_y
+
+        logging.debug(
+            f'Coordinate conversion: document=({x:.1f}, {y:.1f}), '
+            f'scroll_offset=({scroll_x:.1f}, {scroll_y:.1f}), '
+            f'viewport=({viewport_x:.1f}, {viewport_y:.1f})'
+        )
+
+        return (viewport_x, viewport_y)
+
+    async def _get_element_viewport_coordinates(
+        self,
+        element_id: str,
+        selector: Optional[str] = None,
+        xpath: Optional[str] = None,
+        stored_x: Optional[float] = None,
+        stored_y: Optional[float] = None,
+        validate_against_stored: bool = True,
+        action_name: str = "action"
+    ) -> Optional[tuple[float, float]]:
+        """Get viewport coordinates for an element using multiple strategies.
+
+        This method provides a unified approach for obtaining viewport coordinates,
+        handling scroll containers correctly by using Playwright's bounding_box() API.
+
+        Tries strategies in order:
+        1. Fresh bounding_box() via CSS selector (most reliable)
+        2. Fresh bounding_box() via XPath (fallback if CSS fails)
+        3. Coordinate conversion from stored document coords (backward compatibility)
+
+        Args:
+            element_id: Element identifier for logging
+            selector: CSS selector
+            xpath: XPath selector
+            stored_x: Stored document X coordinate
+            stored_y: Stored document Y coordinate
+            validate_against_stored: Whether to validate fresh coords against stored
+            action_name: Name of the action for logging context (e.g., "click", "hover")
+
+        Returns:
+            Tuple of (viewport_x, viewport_y) if successful, None otherwise
+        """
+        # Get current active page
+        page = self._get_current_page()
+        
+        rect = None
+
+        # Strategy 1: Try CSS selector for bounding_box()
+        if self._is_valid_css_selector(selector):
+            try:
+                rect = await page.locator(selector).bounding_box()
+            except Exception as e:
+                logging.debug(f'bounding_box() via CSS selector failed for element {element_id} ({action_name}): {e}')
+
+        # Strategy 2: Try XPath if CSS fails or returns None
+        if not rect and xpath:
+            try:
+                rect = await page.locator(f'xpath={xpath}').bounding_box()
+            except Exception as e:
+                logging.debug(f'bounding_box() via XPath failed for element {element_id} ({action_name}): {e}')
+
+        # Use fresh viewport coordinates if available
+        if rect:
+            viewport_x = rect['x'] + rect['width'] / 2
+            viewport_y = rect['y'] + rect['height'] / 2
+
+            # Optionally validate against stored coordinates to detect scroll container issues
+            if validate_against_stored and stored_x is not None and stored_y is not None:
+                calc_viewport_x, calc_viewport_y = await self._convert_document_to_viewport_coords(stored_x, stored_y)
+                diff_x = abs(viewport_x - calc_viewport_x)
+                diff_y = abs(viewport_y - calc_viewport_y)
+
+                if diff_x > 10 or diff_y > 10:
+                    logging.warning(
+                        f'Coordinate mismatch detected for element {element_id} ({action_name}): '
+                        f'fresh bounding_box=({viewport_x:.1f}, {viewport_y:.1f}), '
+                        f'calculated from stored=({calc_viewport_x:.1f}, {calc_viewport_y:.1f}), '
+                        f'diff=({diff_x:.1f}, {diff_y:.1f}). '
+                        f'Likely scroll container or CSS transform. Using fresh coordinates.'
+                    )
+
+            logging.debug(f'{action_name.capitalize()} at element {element_id}, fresh viewport coordinates=({viewport_x:.1f}, {viewport_y:.1f})')
+            return (viewport_x, viewport_y)
+
+        # Strategy 3: Fallback to stored coordinates with conversion
+        elif stored_x is not None and stored_y is not None:
+            logging.warning(f'bounding_box() returned None for element {element_id} ({action_name}), falling back to stored coordinates')
+            viewport_x, viewport_y = await self._convert_document_to_viewport_coords(stored_x, stored_y)
+            logging.debug(f'{action_name.capitalize()} at element {element_id}, document coordinates=({stored_x}, {stored_y}), calculated viewport=({viewport_x}, {viewport_y})')
+            return (viewport_x, viewport_y)
+
+        else:
+            logging.error(f'Element {element_id} has no valid coordinates for {action_name}: bounding_box=None, stored coordinates missing')
+            return None
 
     async def ensure_element_in_viewport(self, element_id: str, max_retries: int = 3, base_wait_time: float = 0.5) -> bool:
         """Ensure element is in viewport by scrolling if needed with enhanced edge case handling.
@@ -779,12 +1300,101 @@ class ActionHandler:
         action_context_var.set(ctx)
         ctx.element_info = {"element_id": str(id), "action": "click"}
 
-        # Inject JavaScript into the page to remove the target attribute from all links
+        # Inject comprehensive tab interception script (multi-layer defense)
+        # This ensures all new tab attempts are redirected to current tab
         js = """
-        links = document.getElementsByTagName("a");
-        for (var i = 0; i < links.length; i++) {
-            links[i].removeAttribute("target");
-        }
+        (function() {
+            // Layer 1: Remove/modify target attributes from ALL elements
+            function enforceCurrentTabNavigation() {
+                // Links: set to _self instead of removing (more reliable)
+                document.querySelectorAll('a[target]').forEach(el =>
+                    el.setAttribute('target', '_self')
+                );
+                // Forms: redirect form submissions to current tab
+                document.querySelectorAll('form[target]').forEach(el =>
+                    el.setAttribute('target', '_self')
+                );
+                // Image map areas
+                document.querySelectorAll('area[target]').forEach(el =>
+                    el.setAttribute('target', '_self')
+                );
+                // Base tag (affects all links document-wide)
+                const baseTag = document.querySelector('base[target]');
+                if (baseTag) baseTag.setAttribute('target', '_self');
+            }
+
+            // Layer 1.5: Backup history creation for link clicks
+            if (!window.__webqa_link_click_intercepted) {
+                document.addEventListener('click', function(e) {
+                    let target = e.target;
+                    while (target && target.tagName !== 'A') {
+                        target = target.parentElement;
+                        if (!target || target === document.body) return;
+                    }
+                    if (!target || target.tagName !== 'A') return;
+
+                    const href = target.href;
+                    if (!href || href.startsWith('javascript:') || href.startsWith('#') || href === window.location.href) return;
+
+                    try {
+                        window.history.pushState({webqa_back: window.location.href}, '', window.location.href);
+                    } catch (err) {}
+                }, true);
+                window.__webqa_link_click_intercepted = true;
+            }
+
+            // Layer 2: Override window.open() to redirect to current tab with history preservation
+            if (!window.__webqa_window_open_intercepted) {
+                const originalWindowOpen = window.open;
+                window.open = function(url, target, features) {
+                    if (url) {
+                        try {
+                            window.history.pushState({webqa_back: window.location.href}, '', window.location.href);
+                        } catch (e) {}
+                        window.location.href = url;
+                    }
+                    return window;
+                };
+                window.__webqa_window_open_intercepted = true;
+            }
+
+            // Layer 3: MutationObserver to catch dynamically added elements
+            if (!window.__webqa_mutation_observer_active) {
+                const observer = new MutationObserver((mutations) => {
+                    mutations.forEach(mutation => {
+                        mutation.addedNodes.forEach(node => {
+                            if (node.nodeType === 1) {  // Element node
+                                // Check if added node has target attribute
+                                if (node.hasAttribute && node.hasAttribute('target')) {
+                                    node.setAttribute('target', '_self');
+                                }
+                                // Check descendants for target attributes
+                                if (node.querySelectorAll) {
+                                    node.querySelectorAll('[target]').forEach(el =>
+                                        el.setAttribute('target', '_self')
+                                    );
+                                }
+                            }
+                        });
+                    });
+                });
+
+                observer.observe(document.documentElement, {
+                    childList: true,
+                    subtree: true
+                });
+                window.__webqa_mutation_observer_active = true;
+            }
+
+            // Layer 4: Initial enforcement on current page state
+            enforceCurrentTabNavigation();
+
+            // Layer 5: Periodic re-enforcement for delayed/async content (every 1 second)
+            if (!window.__webqa_periodic_check_active) {
+                setInterval(enforceCurrentTabNavigation, 1000);
+                window.__webqa_periodic_check_active = true;
+            }
+        })();
         """
         await page.evaluate(js)
 
@@ -813,6 +1423,23 @@ class ActionHandler:
                 playwright_error=str(e)
             )
             return False
+
+        # Explicit history entry for GoBack support
+        try:
+            tag_name = element.get('tagName', '').lower()
+            href = element.get('href', '')
+            if tag_name == 'a' and href and not href.startswith(('javascript:', '#')):
+                current_url = page.url
+                await page.evaluate(f'''
+                    window.history.pushState(
+                        {{webqa_back: true, from: "{current_url}"}},
+                        "",
+                        "{current_url}"
+                    );
+                ''')
+                logging.debug(f'History entry created for GoBack: {current_url}')
+        except Exception as e:
+            logging.warning(f'Failed to create history entry: {e}')
 
         # Ensure element is in viewport before clicking (for full-page planning mode)
         if not await self.ensure_element_in_viewport(id):
@@ -1410,28 +2037,53 @@ class ActionHandler:
             raise
 
     async def go_back(self) -> bool:
-        """Navigate back to the previous page."""
+        """Navigate back with cross-origin fallback.
+
+        Reference: https://github.com/microsoft/playwright/issues/35039
+        """
         try:
-            await self.page.go_back()
-            logging.debug('Navigated back to the previous page.')
-            return True
+            page = self._get_current_page()
+            url_before = page.url
+            logging.info(f'GoBack: Starting from {url_before}')
+
+            # Strategy 1: Playwright API
+            try:
+                await page.go_back(wait_until='domcontentloaded', timeout=5000)
+                url_after = page.url
+                if url_before != url_after:
+                    logging.info(f'GoBack: Strategy 1 succeeded: {url_before} → {url_after}')
+                    return True
+                logging.info('GoBack: Strategy 1 failed, trying fallback...')
+            except Exception as e:
+                logging.info(f'GoBack: Strategy 1 exception: {e}, trying fallback...')
+
+            # Strategy 2: Browser-level JS API (cross-origin compatible)
+            try:
+                logging.info('GoBack: Trying Strategy 2 (window.history.back)...')
+                await page.evaluate('window.history.back()')
+                try:
+                    await page.wait_for_url(lambda url: url != url_before, timeout=5000)
+                except Exception:
+                    try:
+                        await page.wait_for_load_state('domcontentloaded', timeout=3000)
+                    except Exception:
+                        await asyncio.sleep(1.0)
+
+                url_after = page.url
+                if url_before != url_after:
+                    logging.info(f'GoBack: Strategy 2 succeeded: {url_before} → {url_after}')
+                    return True
+
+                logging.warning(f'GoBack: Both strategies failed. URL unchanged: {url_after}')
+                return False
+            except Exception as e:
+                logging.warning(f'GoBack: Strategy 2 exception: {e}')
+                return False
+
         except Exception as e:
-            logging.error(f'Failed to navigate back: {e}')
+            logging.error(f'GoBack: Unexpected error: {e}')
             return False
 
-    async def get_new_page(self):
-        try:
-            if self.driver:
-                self.page = await self.driver.get_new_page()
-            else:
-                # If no driver, check current context page list
-                pages = self.page.context.pages if self.page else []
-                if len(pages) > 1:
-                    self.page = pages[-1]
-            return True
-        except Exception as e:
-            logging.error(f'Failed to get new page: {e}')
-            return False
 
     async def upload_file(self, id, file_path: Union[str, List[str]]) -> bool:
         """File upload function.
