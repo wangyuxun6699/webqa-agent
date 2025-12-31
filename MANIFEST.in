@@ -1,3 +1,0 @@
-# Include all config files
-recursive-include config *.yaml.example
-

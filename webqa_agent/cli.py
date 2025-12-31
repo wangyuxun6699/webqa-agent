@@ -33,21 +33,34 @@ def get_template_content(mode):
     Returns:
         Template content as string, or None if not found
     """
-    # Try to find template in multiple locations
-    current_dir = Path(__file__).parent.parent  # webqa-agent root
-
+    # Determine template filename based on mode
     if mode == 'gen':
-        template_paths = [
-            current_dir / 'config' / 'config.yaml.example',
-            Path('config/config.yaml.example'),
-        ]
+        template_filename = 'config.yaml.example'
     elif mode == 'run':
-        template_paths = [
-            current_dir / 'config' / 'config_run.yaml.example',
-            Path('config/config_run.yaml.example'),
-        ]
+        template_filename = 'config_run.yaml.example'
     else:
         raise ValueError(f'Invalid mode: {mode}')
+
+    # Try to find template in multiple locations
+    package_dir = Path(__file__).parent  # webqa_agent package directory
+    project_root = package_dir.parent    # project root directory
+    
+    template_paths = [
+        # Check config package (for installed version)
+        project_root / 'config' / template_filename,
+        # Check webqa_agent/config (fallback location)
+        package_dir / 'config' / template_filename,
+        # Check current directory
+        Path('config') / template_filename,
+    ]
+
+    # Try to import from config package if available
+    try:
+        import config
+        config_pkg_dir = Path(config.__file__).parent
+        template_paths.insert(0, config_pkg_dir / template_filename)
+    except ImportError:
+        pass
 
     for template_path in template_paths:
         if template_path.exists():
