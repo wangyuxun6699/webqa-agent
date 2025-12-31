@@ -54,6 +54,9 @@ Repository = "https://github.com/MigoXLab/webqa-agent"
 Documentation = "https://github.com/MigoXLab/webqa-agent#readme"
 Issues = "https://github.com/MigoXLab/webqa-agent/issues"
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["webqa_agent*", "app_gradio*"]
