@@ -154,7 +154,7 @@ cp .env.example .env
 ./start.sh
 ```
 
-> Access via `http://localhost:3000`. For other deployment methods, see [Deployment](#deployment).
+> Access via `http://localhost`. For other deployment methods, see [Deployment](#deployment).
 
 <a id="usage"></a>
 
