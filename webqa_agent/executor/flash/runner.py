@@ -574,19 +574,27 @@ def run_cc_mini(
 
     atexit.register(_emergency_cleanup)
 
-    _prev_sigterm: Any = None
-    _prev_sighup: Any = None
-    _signals_installed = False
-    try:
-        _prev_sigterm = signal.getsignal(signal.SIGTERM)
-        _prev_sighup = signal.getsignal(signal.SIGHUP)
+    _previous_signal_handlers: dict[int, Any] = {}
+    signals_to_install = [signal.SIGTERM]
 
+    sighup = getattr(signal, "SIGHUP", None)
+    if sighup is not None:
+        signals_to_install.append(sighup)
+
+    try:
         def _signal_handler(signum: int, frame: Any) -> None:
             sys.exit(128 + signum)
 
-        signal.signal(signal.SIGTERM, _signal_handler)
-        signal.signal(signal.SIGHUP, _signal_handler)
-        _signals_installed = True
+        for signum in signals_to_install:
+            _previous_signal_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _signal_handler)
+    except ValueError:
+        for signum, previous_handler in _previous_signal_handlers.items():
+            try:
+                signal.signal(signum, previous_handler)
+            except ValueError:
+                pass
+        _previous_signal_handlers.clear()
     except ValueError:
         pass
 
@@ -918,9 +926,8 @@ def run_cc_mini(
         except Exception:
             pass
         atexit.unregister(_emergency_cleanup)
-        if _signals_installed:
-            signal.signal(signal.SIGTERM, _prev_sigterm)
-            signal.signal(signal.SIGHUP, _prev_sighup)
+        for signum, previous_handler in _previous_signal_handlers.items():
+            signal.signal(signum, previous_handler)
 
 
 def _resolve_cdp_port(
