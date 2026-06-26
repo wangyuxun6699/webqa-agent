@@ -152,11 +152,13 @@ class MCPServer:
 
         Raises MCPError if anything fails within startup_timeout_s.
         """
-        cmd = [self._command] + self._args
-        # Resolve command via PATH explicitly for a clearer error message than
-        # Popen's generic FileNotFoundError.
-        if shutil.which(self._command) is None and not os.path.isabs(self._command):
-            raise MCPError(f'{self.name}: command not found on PATH: {self._command!r}')
+        resolved_command = self._command
+        if not os.path.isabs(self._command):
+            resolved_command = shutil.which(self._command) or ''
+            if not resolved_command:
+                raise MCPError(f'{self.name}: command not found on PATH: {self._command!r}')
+
+        cmd = [resolved_command] + self._args
 
         merged_env = None
         if self._env:
