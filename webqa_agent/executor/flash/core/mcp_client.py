@@ -152,11 +152,11 @@ class MCPServer:
 
         Raises MCPError if anything fails within startup_timeout_s.
         """
-        resolved_command = self._command
-        if not os.path.isabs(self._command):
-            resolved_command = shutil.which(self._command) or ''
-            if not resolved_command:
+        resolved_command = shutil.which(self._command)
+        if not resolved_command:
+            if not os.path.isabs(self._command):
                 raise MCPError(f'{self.name}: command not found on PATH: {self._command!r}')
+            resolved_command = self._command
 
         cmd = [resolved_command] + self._args
 

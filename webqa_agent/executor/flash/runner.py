@@ -595,8 +595,6 @@ def run_cc_mini(
             except ValueError:
                 pass
         _previous_signal_handlers.clear()
-    except ValueError:
-        pass
 
     engine: Engine | None = None
     state = _EventLoopState()
@@ -927,7 +925,10 @@ def run_cc_mini(
             pass
         atexit.unregister(_emergency_cleanup)
         for signum, previous_handler in _previous_signal_handlers.items():
-            signal.signal(signum, previous_handler)
+            try:
+                signal.signal(signum, previous_handler)
+            except ValueError:
+                pass
 
 
 def _resolve_cdp_port(
