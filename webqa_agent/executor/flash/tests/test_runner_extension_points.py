@@ -164,6 +164,66 @@ def test_default_mcp_args_include_security_flags():
         '--chrome-arg=... form instead')
 
 
+def _record_signal_calls(monkeypatch):
+    calls = []
+    previous_handlers = {}
+
+    def fake_getsignal(signum):
+        previous = object()
+        previous_handlers[signum] = previous
+        return previous
+
+    def fake_signal(signum, handler):
+        calls.append((signum, handler))
+
+    monkeypatch.setattr(runner.signal, 'getsignal', fake_getsignal)
+    monkeypatch.setattr(runner.signal, 'signal', fake_signal)
+    return calls, previous_handlers
+
+
+def test_signal_handling_without_sighup_installs_only_sigterm(
+    patched_runner, monkeypatch,
+):
+    """Windows-like platforms do not expose signal.SIGHUP."""
+    monkeypatch.delattr(runner.signal, 'SIGHUP', raising=False)
+    calls, previous_handlers = _record_signal_calls(monkeypatch)
+
+    runner.run_cc_mini(
+        'https://example.com', 'task',
+        api_key='fake-key',
+    )
+
+    sigterm = runner.signal.SIGTERM
+    assert [signum for signum, _handler in calls] == [sigterm, sigterm]
+    assert callable(calls[0][1])
+    assert calls[1] == (sigterm, previous_handlers[sigterm])
+
+
+def test_signal_handling_with_sighup_installs_and_restores_both(
+    patched_runner, monkeypatch,
+):
+    fake_sighup = 99999
+    monkeypatch.setattr(runner.signal, 'SIGHUP', fake_sighup, raising=False)
+    calls, previous_handlers = _record_signal_calls(monkeypatch)
+
+    runner.run_cc_mini(
+        'https://example.com', 'task',
+        api_key='fake-key',
+    )
+
+    sigterm = runner.signal.SIGTERM
+    assert [signum for signum, _handler in calls] == [
+        sigterm,
+        fake_sighup,
+        sigterm,
+        fake_sighup,
+    ]
+    assert callable(calls[0][1])
+    assert callable(calls[1][1])
+    assert calls[2] == (sigterm, previous_handlers[sigterm])
+    assert calls[3] == (fake_sighup, previous_handlers[fake_sighup])
+
+
 def test_force_start_uses_list_pages_not_tab_opening_tools(patched_runner):
     """Force-start must be side-effect-free.
 
